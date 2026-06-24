@@ -1,0 +1,9 @@
+{
+  "name": "pi-plan-mode",
+  "version": "1.0.0",
+  "description": "Plan mode extension for pi — read-only exploration, structured planning, and guided execution with progress tracking",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

@@ -12,6 +12,8 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import { Key } from "@earendil-works/pi-tui";
 
 import { loadConfig } from "./config.js";
@@ -22,7 +24,7 @@ import {
   transition,
   type PlanModeState,
 } from "./state.js";
-import { isSafeCommand } from "./utils/index.js";
+import { extractTodoItems, isSafeCommand } from "./utils/index.js";
 import { applyModelForPhase, applyThinkingForPhase } from "./thinking.js";
 
 /** Read-only tools available during the planning / exploration phase. */
@@ -51,7 +53,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // Footer status
   // -----------------------------------------------------------------------
   function updateStatus(ctx: ExtensionContext): void {
-    if (state.phase === Phase.PLANNING) {
+    if (state.phase === Phase.PLANNING || state.phase === Phase.PLAN_READY) {
       ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("warning", "⏸ plan"));
     } else {
       ctx.ui.setStatus("plan-mode", undefined);
@@ -176,7 +178,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // Event: inject planning context when plan mode is active
   // -----------------------------------------------------------------------
   pi.on("before_agent_start", async () => {
-    if (state.phase !== Phase.PLANNING) return;
+    if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
 
     return {
       message: {
@@ -201,6 +203,94 @@ Do NOT attempt to make changes — just describe what you would do.`,
         display: false,
       },
     };
+  });
+
+  // -----------------------------------------------------------------------
+  // Message helpers: narrow agent messages to assistant text
+  // -----------------------------------------------------------------------
+  function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
+    return m.role === "assistant" && Array.isArray(m.content);
+  }
+
+  function getTextContent(message: AssistantMessage): string {
+    return message.content
+      .filter((block): block is TextContent => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+  }
+
+  // -----------------------------------------------------------------------
+  // Event: extract plan and prompt user for next action
+  // -----------------------------------------------------------------------
+  pi.on("agent_end", async (event, ctx) => {
+    // Only act in planning phases, and only when the UI is available
+    if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
+    if (!ctx.hasUI) return;
+
+    // Find the last assistant message and try to extract a plan
+    const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
+    if (lastAssistant) {
+      const items = extractTodoItems(getTextContent(lastAssistant));
+      if (items.length > 0) {
+        state = transition(state, { type: "PLAN_EXTRACTED", items });
+      }
+    }
+
+    // Only prompt if we have plan items
+    if (state.todoItems.length === 0) return;
+
+    // Show the extracted plan steps
+    const todoListText = state.todoItems
+      .map((t, i) => `${i + 1}. ☐ ${t.text}`)
+      .join("\n");
+    pi.sendMessage(
+      {
+        customType: "plan-todo-list",
+        content: `**Plan Steps (${state.todoItems.length}):**\n\n${todoListText}`,
+        display: true,
+      },
+      { triggerTurn: false },
+    );
+
+    // Prompt the user
+    const choice = await ctx.ui.select("Plan mode — what next?", [
+      "Execute the plan (track progress)",
+      "Stay in plan mode",
+      "Refine the plan",
+    ]);
+
+    if (choice?.startsWith("Execute")) {
+      // Transition to execution phase
+      state = transition(state, { type: "EXECUTE_CHOSEN" });
+
+      await applyModelForPhase(pi, config, state.phase, ctx);
+      applyThinkingForPhase(pi, config, state.phase);
+      pi.setActiveTools(NORMAL_MODE_TOOLS);
+
+      const firstStep = state.todoItems[0]?.text ?? "the plan";
+      pi.sendMessage(
+        {
+          customType: "plan-mode-execute",
+          content: `Execute the plan step by step. Start with: ${firstStep}`,
+          display: true,
+        },
+        { triggerTurn: true },
+      );
+
+      updateStatus(ctx);
+      persistState();
+    } else if (choice === "Refine the plan") {
+      // Stay in planning — user provides feedback
+      state = transition(state, { type: "REFINE_CHOSEN" });
+      updateStatus(ctx);
+      persistState();
+
+      const refinement = await ctx.ui.editor("Refine the plan:", "");
+      if (refinement?.trim()) {
+        pi.sendUserMessage(refinement.trim());
+      }
+    }
+    // "Stay in plan mode" — do nothing, user can keep exploring
   });
 
   // -----------------------------------------------------------------------

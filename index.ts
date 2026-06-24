@@ -23,6 +23,8 @@ import {
   type PlanModeState,
 } from "./state.js";
 import { isSafeCommand } from "./utils/index.js";
+import { applyModelForPhase, applyThinkingForPhase } from "./thinking.js";
+
 /** Read-only tools available during the planning / exploration phase. */
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
 
@@ -72,12 +74,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // -----------------------------------------------------------------------
   // Toggle plan mode
   // -----------------------------------------------------------------------
-  function togglePlanMode(ctx: ExtensionContext): void {
+  async function togglePlanMode(ctx: ExtensionContext): Promise<void> {
     const prev = state;
     state = transition(state, { type: "TOGGLE" });
 
     if (isPlanModeActive(state)) {
-      // Entering plan mode: snapshot current settings, switch to read-only
+      // Entering plan mode: snapshot current settings, apply planning config
       state = {
         ...state,
         previousModel: ctx.model
@@ -86,12 +88,27 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         previousEffort: pi.getThinkingLevel(),
         previousTools: pi.getActiveTools(),
       };
+
+      await applyModelForPhase(pi, config, state.phase, ctx);
+      applyThinkingForPhase(pi, config, state.phase);
       pi.setActiveTools(PLAN_MODE_TOOLS);
+
       ctx.ui.notify(
-        `Plan mode enabled. Read-only tools: ${PLAN_MODE_TOOLS.join(", ")}`,
+        `Plan mode enabled (${config.planEffort} thinking). ` +
+          `Read-only tools: ${PLAN_MODE_TOOLS.join(", ")}`,
       );
     } else {
-      // Exiting plan mode: restore previous settings
+      // Exiting plan mode: restore previous model, effort, and tools
+      if (state.previousModel) {
+        const prevModel = ctx.modelRegistry.find(
+          state.previousModel.provider,
+          state.previousModel.id,
+        );
+        if (prevModel) await pi.setModel(prevModel);
+      }
+      if (state.previousEffort) {
+        pi.setThinkingLevel(state.previousEffort);
+      }
       if (state.previousTools) {
         pi.setActiveTools(state.previousTools);
       } else {
@@ -110,12 +127,16 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // -----------------------------------------------------------------------
   pi.registerCommand("plan", {
     description: "Toggle plan mode (read-only exploration)",
-    handler: async (_args, ctx) => togglePlanMode(ctx),
+    handler: async (_args, ctx) => {
+      await togglePlanMode(ctx);
+    },
   });
 
   pi.registerShortcut(Key.ctrlAlt("p"), {
     description: "Toggle plan mode",
-    handler: async (ctx) => togglePlanMode(ctx),
+    handler: async (ctx) => {
+      await togglePlanMode(ctx);
+    },
   });
 
   // -----------------------------------------------------------------------

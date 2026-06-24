@@ -23,7 +23,11 @@ import {
   type PlanModeState,
 } from "./state.js";
 import { isSafeCommand } from "./utils/index.js";
-import { NORMAL_MODE_TOOLS, PLAN_MODE_TOOLS } from "./tools.js";
+/** Read-only tools available during the planning / exploration phase. */
+const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
+
+/** Full-access tools available during normal operation and execution phase. */
+const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
 
 export default function planModeExtension(pi: ExtensionAPI): void {
   // -----------------------------------------------------------------------

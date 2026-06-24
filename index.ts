@@ -161,8 +161,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       message: {
         customType: "plan-mode-context",
         content: `[PLAN MODE — EXPLORATION]
-You are in exploration mode (read-only). Your tools are limited to reading files,
-searching code, and running safe bash commands. You CANNOT edit or write files.
+You are in exploration mode (read-only). Available tools:
+  read, bash, grep, find, ls, questionnaire
+
+You CANNOT edit or write files. Bash is restricted to read-only commands.
+Use the questionnaire tool if you need to ask clarifying questions.
 
 Goal: Understand the problem deeply, then produce a detailed numbered plan.
 

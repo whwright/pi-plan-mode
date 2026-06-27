@@ -24,7 +24,7 @@ import {
   transition,
   type PlanModeState,
 } from "./state.js";
-import { extractTodoItems, isSafeCommand } from "./utils/index.js";
+import { extractTodoItems, isSafeCommand, markCompletedSteps } from "./utils/index.js";
 import { applyModelForPhase, applyThinkingForPhase } from "./thinking.js";
 
 /** Read-only tools available during the planning / exploration phase. */
@@ -53,10 +53,31 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // Footer status
   // -----------------------------------------------------------------------
   function updateStatus(ctx: ExtensionContext): void {
-    if (state.phase === Phase.PLANNING || state.phase === Phase.PLAN_READY) {
+    if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
+      // Show progress counter in footer
+      const completed = state.todoItems.filter((t) => t.completed).length;
+      ctx.ui.setStatus(
+        "plan-mode",
+        ctx.ui.theme.fg("accent", `📋 ${completed}/${state.todoItems.length}`),
+      );
+
+      // Show progress widget above editor
+      const lines = state.todoItems.map((item) => {
+        if (item.completed) {
+          return (
+            ctx.ui.theme.fg("success", "☑ ") +
+            ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(item.text))
+          );
+        }
+        return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
+      });
+      ctx.ui.setWidget("plan-todos", lines);
+    } else if (state.phase === Phase.PLANNING || state.phase === Phase.PLAN_READY) {
       ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("warning", "⏸ plan"));
+      ctx.ui.setWidget("plan-todos", undefined);
     } else {
       ctx.ui.setStatus("plan-mode", undefined);
+      ctx.ui.setWidget("plan-todos", undefined);
     }
   }
 
@@ -178,6 +199,26 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // Event: inject planning context when plan mode is active
   // -----------------------------------------------------------------------
   pi.on("before_agent_start", async () => {
+    // Execution phase: inject remaining steps
+    if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
+      const remaining = state.todoItems.filter((t) => !t.completed);
+      const todoList = remaining.map((t) => `${t.step}. ${t.text}`).join("\n");
+      return {
+        message: {
+          customType: "plan-execution-context",
+          content: `[EXECUTING PLAN — Full tool access enabled]
+
+Remaining steps:
+${todoList}
+
+Execute each step in order.
+After completing a step, include a [DONE:n] tag in your response (e.g. "[DONE:1] done").`,
+          display: false,
+        },
+      };
+    }
+
+    // Planning phases: inject exploration context
     if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
 
     return {
@@ -220,9 +261,44 @@ Do NOT attempt to make changes — just describe what you would do.`,
   }
 
   // -----------------------------------------------------------------------
+  // Event: track [DONE:n] markers after each turn
+  // -----------------------------------------------------------------------
+  pi.on("turn_end", async (event, ctx) => {
+    if (state.phase !== Phase.EXECUTING || state.todoItems.length === 0) return;
+    if (!isAssistantMessage(event.message)) return;
+
+    const text = getTextContent(event.message);
+    if (markCompletedSteps(text, state.todoItems) > 0) {
+      updateStatus(ctx);
+      persistState();
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // Event: extract plan and prompt user for next action
   // -----------------------------------------------------------------------
   pi.on("agent_end", async (event, ctx) => {
+    // Handle execution completion: check if all steps are done
+    if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
+      if (state.todoItems.every((t) => t.completed)) {
+        const completedList = state.todoItems
+          .map((t) => `~~${t.text}~~`)
+          .join("\n");
+        pi.sendMessage(
+          {
+            customType: "plan-complete",
+            content: `**Plan Complete!** ✓\n\n${completedList}`,
+            display: true,
+          },
+          { triggerTurn: false },
+        );
+        state = transition(state, { type: "ALL_STEPS_DONE" });
+        pi.setActiveTools(NORMAL_MODE_TOOLS);
+        updateStatus(ctx);
+        persistState();
+      }
+      return;
+    }
     // Only act in planning phases, and only when the UI is available
     if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
     if (!ctx.hasUI) return;

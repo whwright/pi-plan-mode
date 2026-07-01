@@ -190,6 +190,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         const entry = m as { customType?: string; role?: string };
         if (entry.customType === "plan-mode-context") return false;
         if (entry.customType === "plan-execution-context") return false;
+        if (entry.customType === "plan-todo-list") return false;
+        if (entry.customType === "plan-mode-execute") return false;
         return true;
       }),
     };
@@ -387,6 +389,8 @@ Do NOT attempt to make changes — just describe what you would do.`,
       )
       .pop() as { data?: PlanModeState & { todos?: PlanModeState["todoItems"] } } | undefined;
 
+    const isResume = planModeEntry !== undefined;
+
     if (planModeEntry?.data) {
       state = {
         ...state,
@@ -398,8 +402,47 @@ Do NOT attempt to make changes — just describe what you would do.`,
       };
     }
 
-    // Apply tool set based on restored state
-    if (isPlanModeActive(state)) {
+    // On resume mid-execution: re-scan messages after the execution start
+    // marker to rebuild [DONE:n] completion state.
+    if (
+      isResume &&
+      state.phase === Phase.EXECUTING &&
+      state.todoItems.length > 0
+    ) {
+      // Find the index of the last plan-mode-execute entry
+      let executeIndex = -1;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i] as { type: string; customType?: string };
+        if (entry.customType === "plan-mode-execute") {
+          executeIndex = i;
+          break;
+        }
+      }
+
+      // Scan all assistant messages after that marker
+      const messages: AssistantMessage[] = [];
+      for (let i = executeIndex + 1; i < entries.length; i++) {
+        const entry = entries[i] as {
+          type: string;
+          message?: AgentMessage;
+        };
+        if (
+          entry.type === "message" &&
+          entry.message &&
+          isAssistantMessage(entry.message)
+        ) {
+          messages.push(entry.message);
+        }
+      }
+
+      const allText = messages.map(getTextContent).join("\n");
+      markCompletedSteps(allText, state.todoItems);
+    }
+
+    // Apply the right tool set for the restored phase
+    if (state.phase === Phase.EXECUTING) {
+      pi.setActiveTools(NORMAL_MODE_TOOLS);
+    } else if (isPlanModeActive(state)) {
       pi.setActiveTools(PLAN_MODE_TOOLS);
     }
 

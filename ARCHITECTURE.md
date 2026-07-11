@@ -40,8 +40,9 @@ By default, plan mode changes **only the thinking effort level**. No model switc
 pi-plan-mode/
 ├── index.ts                 # Extension entry point. Registers events, commands,
 │                            # shortcuts, flag. Wires everything together.
-├── config.ts                # Reads PI_PLAN_MODE_* env vars, produces a
-│                            # PlanModeConfig object with defaults.
+├── config.ts                # PlanModeConfig with defaults (current model,
+│                            # xhigh/low). Mutable at runtime. Serialization
+│                            # and file I/O for persistence.
 ├── state.ts                 # State machine: Phase enum, PlanModeState type,
 │                            # transition function, guard checks.
 ├── utils/
@@ -51,6 +52,9 @@ pi-plan-mode/
 │   │                        # markCompletedSteps(text, items): number
 │   │                        # cleanStepText(text): string
 │   └── index.ts             # Re-exports
+├── settings-ui.ts           # Interactive /plan-settings UI — SelectList
+│                            # for model picking (filter-as-you-type) and
+│                            # effort level selection.
 ├── tools.ts                 # PLAN_MODE_TOOLS, NORMAL_MODE_TOOLS constants
 │                            # applyToolSet(pi, phase) helper
 ├── thinking.ts              # applyThinkingLevel(pi, config, phase) helper
@@ -111,20 +115,12 @@ Phases:
 
 ---
 
-## Configuration (Env Vars)
+## Configuration
 
-All optional. When unset, plan mode only changes thinking effort.
+Defaults: current model for both phases, `xhigh` planning effort, `low` execution effort.
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `PI_PLAN_MODE_PLAN_MODEL` | Model during planning phase | (current session model) |
-| `PI_PLAN_MODE_IMPL_MODEL` | Model during execution phase | (current session model) |
-| `PI_PLAN_MODE_PLAN_EFFORT` | Thinking effort during planning | `"xhigh"` |
-| `PI_PLAN_MODE_IMPL_EFFORT` | Thinking effort during execution | `"low"` |
-
-Format for `*_MODEL`: `provider/modelId` (e.g., `anthropic/claude-sonnet-4-5`).
-
-Format for `*_EFFORT`: `off | minimal | low | medium | high | xhigh`.
+Override via `/plan-settings` — an interactive menu with a fuzzy-searchable model picker.
+Settings persist to `~/.pi/extensions/pi-plan-mode/config.json`.
 
 ---
 

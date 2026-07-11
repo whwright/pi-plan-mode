@@ -16,16 +16,22 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import { Key } from "@earendil-works/pi-tui";
 
-import { loadConfig } from "./config.js";
+import {
+  createPlanModeConfig,
+  loadConfigFromFile,
+  saveConfigToFile,
+} from "./config.js";
 import {
   createInitialState,
   isPlanModeActive,
+  isReadOnly,
   Phase,
   transition,
   type PlanModeState,
 } from "./state.js";
 import { extractTodoItems, isSafeCommand, markCompletedSteps } from "./utils/index.js";
 import { applyModelForPhase, applyThinkingForPhase } from "./thinking.js";
+import { showPlanSettings } from "./settings-ui.js";
 
 /** Read-only tools available during the planning / exploration phase. */
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
@@ -82,7 +88,7 @@ function hasQuestionnaire(pi: ExtensionAPI): boolean {
 // ---------------------------------------------------------------------------
 
 export default function planModeExtension(pi: ExtensionAPI): void {
-  const config = loadConfig();
+  const config = createPlanModeConfig();
   let state: PlanModeState = createInitialState();
   let promptPending = false;
 
@@ -214,6 +220,33 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("plan-settings", {
+    description: "Configure plan mode (model, thinking effort)",
+    handler: async (_args, ctx) => {
+      const updated = await showPlanSettings(ctx, pi, config);
+
+      // Apply changes to the live config
+      config.planModel = updated.planModel;
+      config.implModel = updated.implModel;
+      config.planEffort = updated.planEffort;
+      config.implEffort = updated.implEffort;
+
+      // Persist to file so settings survive all sessions
+      await saveConfigToFile(config);
+
+      // If currently in an active plan mode phase, re-apply thinking effort
+      if (isPlanModeActive(state)) {
+        applyThinkingForPhase(pi, config, state.phase);
+      }
+
+      ctx.ui.notify(
+        `Plan settings: plan=${config.planEffort} / impl=${config.implEffort}` +
+          (config.planModel ? ` / model=${config.planModel.provider}/${config.planModel.modelId}` : ""),
+        "info",
+      );
+    },
+  });
+
   pi.registerShortcut(Key.ctrlAlt("p"), {
     description: "Toggle plan mode",
     handler: async (ctx) => {
@@ -226,6 +259,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // -----------------------------------------------------------------------
   pi.on("tool_call", async (event) => {
     if (!isPlanModeActive(state) || event.toolName !== "bash") return;
+    if (!isReadOnly(state)) return; // execution phase has full access
 
     const command = event.input.command as string;
     if (!isSafeCommand(command)) {
@@ -364,6 +398,11 @@ Do NOT attempt to make changes — just describe what you would do.`,
       }
     }
 
+    // Only prompt when a plan was actually extracted.
+    // If the agent is still asking clarifying questions, let the user
+    // respond naturally without the prompt blocking them.
+    if (state.todoItems.length === 0) return;
+
     // Prevent duplicate prompts
     if (promptPending) return;
     promptPending = true;
@@ -463,8 +502,10 @@ Do NOT attempt to make changes — just describe what you would do.`,
       state = transition(state, { type: "TOGGLE" });
     }
 
-    // Restore persisted state from session entries
+    // Restore persisted config from file
     const entries = ctx.sessionManager.getEntries();
+    await loadConfigFromFile(config);
+
     const planModeEntry = entries
       .filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "plan-mode")
       .pop() as { data?: PlanModeState & { todos?: PlanModeState["todoItems"] } } | undefined;

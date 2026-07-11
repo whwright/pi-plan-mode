@@ -1,29 +1,28 @@
 /**
- * Plan mode configuration from environment variables.
+ * Plan mode configuration.
  *
- * All variables are optional. When unset, plan mode only changes the
- * thinking effort level — it keeps the session's current model.
+ * Defaults: current model, xhigh thinking for planning, low for execution.
+ * Override via /plan-settings — settings persist to
+ * ~/.pi/extensions/pi-plan-mode/config.json and survive all sessions.
  *
- * Environment variables:
- *   PI_PLAN_MODE_PLAN_MODEL   — Model during planning (format: provider/modelId)
- *   PI_PLAN_MODE_IMPL_MODEL   — Model during execution (format: provider/modelId)
- *   PI_PLAN_MODE_PLAN_EFFORT  — Thinking effort during planning (default: "xhigh")
- *   PI_PLAN_MODE_IMPL_EFFORT  — Thinking effort during execution (default: "low")
- *
- * No pi dependencies — only reads process.env.
+ * Priority: config.json > defaults.
  */
+
+import { homedir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 /** Thinking effort levels supported by pi. */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-const VALID_EFFORT_LEVELS: ReadonlySet<string> = new Set([
+export const EFFORT_LEVELS: readonly ThinkingLevel[] = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-]);
+];
 
 /** A parsed model reference: provider and model ID. */
 export interface ModelRef {
@@ -31,7 +30,7 @@ export interface ModelRef {
   modelId: string;
 }
 
-/** Resolved configuration with all defaults applied. */
+/** Runtime-mutable configuration. */
 export interface PlanModeConfig {
   /** Model override for the planning phase, or undefined to keep current. */
   planModel?: ModelRef;
@@ -43,57 +42,79 @@ export interface PlanModeConfig {
   implEffort: ThinkingLevel;
 }
 
-/** Default thinking levels when no env vars are set. */
+/** JSON-serializable form of the config for persistence. */
+export interface SerializedConfig {
+  planModel?: { provider: string; modelId: string } | null;
+  implModel?: { provider: string; modelId: string } | null;
+  planEffort?: ThinkingLevel;
+  implEffort?: ThinkingLevel;
+}
+
+/** Path to the persisted settings file. */
+const CONFIG_PATH = `${homedir()}/.pi/extensions/pi-plan-mode/config.json`;
+
+/** Default thinking levels. */
 const DEFAULT_PLAN_EFFORT: ThinkingLevel = "xhigh";
 const DEFAULT_IMPL_EFFORT: ThinkingLevel = "low";
 
 /**
- * Parse a "provider/modelId" string into a ModelRef.
- * Returns undefined if the string is empty or malformed.
+ * Create a new configuration with sensible defaults.
+ * Call /plan-settings to override, loadConfigFromFile to restore.
  */
-function parseModelRef(raw: string | undefined): ModelRef | undefined {
-  if (!raw || raw.trim().length === 0) return undefined;
-
-  const slashIdx = raw.indexOf("/");
-  if (slashIdx <= 0 || slashIdx === raw.length - 1) {
-    // Malformed — must be "provider/modelId"
-    console.warn(`[pi-plan-mode] Invalid model format "${raw}". Expected "provider/modelId".`);
-    return undefined;
-  }
-
+export function createPlanModeConfig(): PlanModeConfig {
   return {
-    provider: raw.slice(0, slashIdx).trim(),
-    modelId: raw.slice(slashIdx + 1).trim(),
+    planEffort: DEFAULT_PLAN_EFFORT,
+    implEffort: DEFAULT_IMPL_EFFORT,
   };
 }
 
 /**
- * Parse and validate a thinking effort level from an env var.
- * Returns the parsed level or undefined if not set / invalid.
+ * Load persisted settings from ~/.pi/extensions/pi-plan-mode/config.json
+ * and apply them on top of a live config. Returns true if file was loaded.
  */
-function parseEffort(raw: string | undefined): ThinkingLevel | undefined {
-  if (!raw || raw.trim().length === 0) return undefined;
-
-  const normalized = raw.trim().toLowerCase();
-  if (!VALID_EFFORT_LEVELS.has(normalized)) {
-    console.warn(
-      `[pi-plan-mode] Invalid effort level "${raw}". Valid: ${[...VALID_EFFORT_LEVELS].join(", ")}.`,
-    );
-    return undefined;
+export async function loadConfigFromFile(config: PlanModeConfig): Promise<boolean> {
+  try {
+    const raw = await readFile(CONFIG_PATH, "utf-8");
+    const data = JSON.parse(raw) as Partial<SerializedConfig>;
+    applySerializedConfig(config, data);
+    return true;
+  } catch {
+    // File doesn't exist or is unreadable — that's fine, keep defaults.
+    return false;
   }
-
-  return normalized as ThinkingLevel;
 }
 
 /**
- * Load the plan mode configuration from environment variables.
- * All fields have sensible defaults — only effort levels change by default.
+ * Write the current config to ~/.pi/extensions/pi-plan-mode/config.json.
  */
-export function loadConfig(): PlanModeConfig {
+export async function saveConfigToFile(config: PlanModeConfig): Promise<void> {
+  const dir = dirname(CONFIG_PATH);
+  await mkdir(dir, { recursive: true });
+  await writeFile(CONFIG_PATH, JSON.stringify(serializeConfig(config), null, 2), "utf-8");
+}
+
+/** Serialize config to a JSON-safe object for file persistence. */
+export function serializeConfig(config: PlanModeConfig): SerializedConfig {
   return {
-    planModel: parseModelRef(process.env.PI_PLAN_MODE_PLAN_MODEL),
-    implModel: parseModelRef(process.env.PI_PLAN_MODE_IMPL_MODEL),
-    planEffort: parseEffort(process.env.PI_PLAN_MODE_PLAN_EFFORT) ?? DEFAULT_PLAN_EFFORT,
-    implEffort: parseEffort(process.env.PI_PLAN_MODE_IMPL_EFFORT) ?? DEFAULT_IMPL_EFFORT,
+    planModel: config.planModel ? { provider: config.planModel.provider, modelId: config.planModel.modelId } : null,
+    implModel: config.implModel ? { provider: config.implModel.provider, modelId: config.implModel.modelId } : null,
+    planEffort: config.planEffort,
+    implEffort: config.implEffort,
   };
+}
+
+/** Apply persisted settings on top of a live config. Only defined keys are merged. */
+export function applySerializedConfig(config: PlanModeConfig, data: Partial<SerializedConfig>): void {
+  if (data.planModel !== undefined) {
+    config.planModel = data.planModel ? { ...data.planModel } : undefined;
+  }
+  if (data.implModel !== undefined) {
+    config.implModel = data.implModel ? { ...data.implModel } : undefined;
+  }
+  if (data.planEffort !== undefined) {
+    config.planEffort = data.planEffort;
+  }
+  if (data.implEffort !== undefined) {
+    config.implEffort = data.implEffort;
+  }
 }

@@ -5,7 +5,7 @@ A pi extension that adds a structured plan mode with two distinct phases:
 1. **Exploration** — Read-only, xhigh thinking. Agent explores code and produces a numbered plan.
 2. **Execution** — Full write access, low thinking. Agent implements the plan step-by-step with progress tracking.
 
-By default, plan mode only changes the thinking effort level (xhigh ↔ low) and keeps your session's current model. Model and effort can be overridden per phase via environment variables.
+By default, plan mode only changes the thinking effort level (xhigh ↔ low) and keeps your session's current model. Use `/plan-settings` to customize per-phase model and effort.
 
 ## Quick Start
 
@@ -54,34 +54,17 @@ Footer: `📋 2/3` while executing, `⏸ plan` while exploring.
 
 ## Configuration
 
-All environment variables are optional. When unset, plan mode only changes thinking effort.
+Use the `/plan-settings` command to interactively configure plan mode. This opens a menu where you can choose:
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `PI_PLAN_MODE_PLAN_MODEL` | Model during exploration | (current session model) |
-| `PI_PLAN_MODE_IMPL_MODEL` | Model during execution | (current session model) |
-| `PI_PLAN_MODE_PLAN_EFFORT` | Thinking effort during exploration | `xhigh` |
-| `PI_PLAN_MODE_IMPL_EFFORT` | Thinking effort during execution | `low` |
+- **Plan thinking effort** — Defaults to `xhigh`
+- **Plan model** — Defaults to your session's current model
+- **Implementation thinking effort** — Defaults to `low`
+- **Implementation model** — Defaults to your session's current model
 
-### Model format
+Model selection uses a fuzzy-searchable list — type characters to narrow results. Settings are persisted across all sessions in `~/.pi/extensions/pi-plan-mode/config.json`.
 
 ```
-provider/modelId
-```
-
-Examples:
-```bash
-export PI_PLAN_MODE_PLAN_MODEL="anthropic/claude-sonnet-4-5"
-export PI_PLAN_MODE_IMPL_MODEL="openai/gpt-5.2-codex"
-```
-
-### Effort levels
-
-`off` | `minimal` | `low` | `medium` | `high` | `xhigh`
-
-```bash
-export PI_PLAN_MODE_PLAN_EFFORT="high"
-export PI_PLAN_MODE_IMPL_EFFORT="off"
+/plan-settings
 ```
 
 ## Read-Only Tools

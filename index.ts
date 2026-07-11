@@ -33,12 +33,58 @@ const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
 /** Full-access tools available during normal operation and execution phase. */
 const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
+  return m.role === "assistant" && Array.isArray(m.content);
+}
+
+function getTextContent(message: AssistantMessage): string {
+  return message.content
+    .filter((block): block is TextContent => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+/** Poll until the agent is idle so we can safely show a prompt. */
+async function waitForIdle(ctx: ExtensionContext, timeoutMs = 15000): Promise<boolean> {
+  const start = Date.now();
+  while (!ctx.isIdle()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
+/** Names of tools actually registered in this runtime. */
+function availableToolNames(pi: ExtensionAPI): Set<string> {
+  try {
+    return new Set(pi.getAllTools().map((t) => t.name));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Filter PLAN_MODE_TOOLS to only tools actually registered. */
+function resolvePlanModeTools(pi: ExtensionAPI): string[] {
+  const available = availableToolNames(pi);
+  return PLAN_MODE_TOOLS.filter((name) => available.has(name));
+}
+
+function hasQuestionnaire(pi: ExtensionAPI): boolean {
+  return availableToolNames(pi).has("questionnaire");
+}
+
+// ---------------------------------------------------------------------------
+// Extension
+// ---------------------------------------------------------------------------
+
 export default function planModeExtension(pi: ExtensionAPI): void {
-  // -----------------------------------------------------------------------
-  // Module-level state (singleton per session)
-  // -----------------------------------------------------------------------
   const config = loadConfig();
   let state: PlanModeState = createInitialState();
+  let promptPending = false;
 
   // -----------------------------------------------------------------------
   // CLI flag
@@ -50,18 +96,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   });
 
   // -----------------------------------------------------------------------
-  // Footer status
+  // Footer status & progress widget
   // -----------------------------------------------------------------------
   function updateStatus(ctx: ExtensionContext): void {
     if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
-      // Show progress counter in footer
       const completed = state.todoItems.filter((t) => t.completed).length;
-      ctx.ui.setStatus(
-        "plan-mode",
-        ctx.ui.theme.fg("accent", `📋 ${completed}/${state.todoItems.length}`),
-      );
+      ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("accent", `📋 ${completed}/${state.todoItems.length}`));
 
-      // Show progress widget above editor
       const lines = state.todoItems.map((item) => {
         if (item.completed) {
           return (
@@ -72,7 +113,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
       });
       ctx.ui.setWidget("plan-todos", lines);
-    } else if (state.phase === Phase.PLANNING || state.phase === Phase.PLAN_READY) {
+    } else if (isPlanModeActive(state)) {
       ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("warning", "⏸ plan"));
       ctx.ui.setWidget("plan-todos", undefined);
     } else {
@@ -95,6 +136,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   }
 
   // -----------------------------------------------------------------------
+  // Deferred display — wait until the agent is idle so the message doesn't
+  // enqueue a steer continuation and re-trigger the agent.
+  // -----------------------------------------------------------------------
+  function displayWhenIdle(ctx: ExtensionContext, customType: string, content: string): void {
+    void (async () => {
+      try {
+        if (await waitForIdle(ctx)) {
+          pi.sendMessage({ customType, content, display: true }, { triggerTurn: false });
+        }
+      } catch {
+        // ctx may be stale after a session switch/reload; ignore.
+      }
+    })();
+  }
+
+  // -----------------------------------------------------------------------
   // Toggle plan mode
   // -----------------------------------------------------------------------
   async function togglePlanMode(ctx: ExtensionContext): Promise<void> {
@@ -114,11 +171,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
       await applyModelForPhase(pi, config, state.phase, ctx);
       applyThinkingForPhase(pi, config, state.phase);
-      pi.setActiveTools(PLAN_MODE_TOOLS);
+
+      const planTools = resolvePlanModeTools(pi);
+      pi.setActiveTools(planTools);
 
       ctx.ui.notify(
         `Plan mode enabled (${config.planEffort} thinking). ` +
-          `Read-only tools: ${PLAN_MODE_TOOLS.join(", ")}`,
+          `Read-only tools: ${planTools.join(", ")}`,
       );
     } else {
       // Exiting plan mode: restore previous model, effort, and tools
@@ -198,7 +257,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   });
 
   // -----------------------------------------------------------------------
-  // Event: inject planning context when plan mode is active
+  // Event: inject planning / execution context before each turn
   // -----------------------------------------------------------------------
   pi.on("before_agent_start", async () => {
     // Execution phase: inject remaining steps
@@ -214,7 +273,7 @@ Remaining steps:
 ${todoList}
 
 Execute each step in order.
-After completing a step, include a [DONE:n] tag in your response (e.g. "[DONE:1] done").`,
+After completing a step, include a [DONE:n] tag in your response (e.g. [DONE:1]).`,
           display: false,
         },
       };
@@ -223,19 +282,27 @@ After completing a step, include a [DONE:n] tag in your response (e.g. "[DONE:1]
     // Planning phases: inject exploration context
     if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
 
+    const planTools = resolvePlanModeTools(pi);
+    const clarifyLine = hasQuestionnaire(pi)
+      ? "Ask clarifying questions using the questionnaire tool."
+      : "Ask clarifying questions in plain text and wait for the user's reply before planning.";
+
     return {
       message: {
         customType: "plan-mode-context",
         content: `[PLAN MODE — EXPLORATION]
-You are in exploration mode (read-only). Available tools:
-  read, bash, grep, find, ls, questionnaire
+You are in exploration mode (read-only).
 
-You CANNOT edit or write files. Bash is restricted to read-only commands.
-Use the questionnaire tool if you need to ask clarifying questions.
+Restrictions:
+- You can only use: ${planTools.join(", ")}
+- You CANNOT use: edit, write (file modifications are disabled)
+- Bash is restricted to an allowlist of read-only commands
 
-Goal: Understand the problem deeply, then produce a detailed numbered plan.
+This is a two-effort workflow: you plan on ${config.planEffort} effort, and the plan is then executed on ${config.implEffort} effort. Produce a plan precise enough that the lower-effort execution pass can implement it without re-deriving your reasoning.
 
-When ready, output your plan under a "Plan:" header:
+${clarifyLine}
+
+Create a detailed numbered plan under a "Plan:" header:
 
 Plan:
 1. First step — what to change and why
@@ -247,20 +314,6 @@ Do NOT attempt to make changes — just describe what you would do.`,
       },
     };
   });
-
-  // -----------------------------------------------------------------------
-  // Message helpers: narrow agent messages to assistant text
-  // -----------------------------------------------------------------------
-  function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
-    return m.role === "assistant" && Array.isArray(m.content);
-  }
-
-  function getTextContent(message: AssistantMessage): string {
-    return message.content
-      .filter((block): block is TextContent => block.type === "text")
-      .map((block) => block.text)
-      .join("\n");
-  }
 
   // -----------------------------------------------------------------------
   // Event: track [DONE:n] markers after each turn
@@ -277,23 +330,20 @@ Do NOT attempt to make changes — just describe what you would do.`,
   });
 
   // -----------------------------------------------------------------------
-  // Event: extract plan and prompt user for next action
+  // Event: extract plan, check execution completion
+  //
+  // CRITICAL: agent_end must NOT await the post-plan prompt. agent_end runs
+  // while the agent may still be finalizing, so any pi.sendMessage or
+  // sendUserMessage can enqueue a steer continuation that re-triggers the
+  // agent (infinite re-plan loop). We extract the plan, check completion,
+  // and fire-and-forget the prompt via poll-then-show.
   // -----------------------------------------------------------------------
   pi.on("agent_end", async (event, ctx) => {
-    // Handle execution completion: check if all steps are done
+    // Check if execution is complete
     if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
       if (state.todoItems.every((t) => t.completed)) {
-        const completedList = state.todoItems
-          .map((t) => `~~${t.text}~~`)
-          .join("\n");
-        pi.sendMessage(
-          {
-            customType: "plan-complete",
-            content: `**Plan Complete!** ✓\n\n${completedList}`,
-            display: true,
-          },
-          { triggerTurn: false },
-        );
+        const completedList = state.todoItems.map((t) => `~~${t.text}~~`).join("\n");
+        displayWhenIdle(ctx, "plan-complete", `**Plan Complete!** ✓\n\n${completedList}`);
         state = transition(state, { type: "ALL_STEPS_DONE" });
         pi.setActiveTools(NORMAL_MODE_TOOLS);
         updateStatus(ctx);
@@ -301,11 +351,11 @@ Do NOT attempt to make changes — just describe what you would do.`,
       }
       return;
     }
-    // Only act in planning phases, and only when the UI is available
-    if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
-    if (!ctx.hasUI) return;
 
-    // Find the last assistant message and try to extract a plan
+    if (!isPlanModeActive(state) || !ctx.hasUI) return;
+    if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
+
+    // Extract plan from last assistant message
     const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
     if (lastAssistant) {
       const items = extractTodoItems(getTextContent(lastAssistant));
@@ -314,62 +364,95 @@ Do NOT attempt to make changes — just describe what you would do.`,
       }
     }
 
-    // Only prompt if we have plan items
-    if (state.todoItems.length === 0) return;
+    // Prevent duplicate prompts
+    if (promptPending) return;
+    promptPending = true;
 
-    // Show the extracted plan steps
-    const todoListText = state.todoItems
-      .map((t, i) => `${i + 1}. ☐ ${t.text}`)
-      .join("\n");
-    pi.sendMessage(
-      {
-        customType: "plan-todo-list",
-        content: `**Plan Steps (${state.todoItems.length}):**\n\n${todoListText}`,
-        display: true,
-      },
-      { triggerTurn: false },
-    );
-
-    // Prompt the user
-    const choice = await ctx.ui.select("Plan mode — what next?", [
-      "Execute the plan (track progress)",
-      "Stay in plan mode",
-      "Refine the plan",
-    ]);
-
-    if (choice?.startsWith("Execute")) {
-      // Transition to execution phase
-      state = transition(state, { type: "EXECUTE_CHOSEN" });
-
-      await applyModelForPhase(pi, config, state.phase, ctx);
-      applyThinkingForPhase(pi, config, state.phase);
-      pi.setActiveTools(NORMAL_MODE_TOOLS);
-
-      const firstStep = state.todoItems[0]?.text ?? "the plan";
-      pi.sendMessage(
-        {
-          customType: "plan-mode-execute",
-          content: `Execute the plan step by step. Start with: ${firstStep}`,
-          display: true,
-        },
-        { triggerTurn: true },
-      );
-
-      updateStatus(ctx);
-      persistState();
-    } else if (choice === "Refine the plan") {
-      // Stay in planning — user provides feedback
-      state = transition(state, { type: "REFINE_CHOSEN" });
-      updateStatus(ctx);
-      persistState();
-
-      const refinement = await ctx.ui.editor("Refine the plan:", "");
-      if (refinement?.trim()) {
-        pi.sendUserMessage(refinement.trim());
-      }
-    }
-    // "Stay in plan mode" — do nothing, user can keep exploring
+    // Fire-and-forget: poll until idle, then show the prompt.
+    // This lets agent_end return immediately so pi can finalize the run
+    // and clear the spinner.
+    void promptForNextAction(ctx);
   });
+
+  // -----------------------------------------------------------------------
+  // Show the post-plan prompt — runs AFTER the agent is fully idle.
+  // This ensures triggering execution/refinement starts a clean new turn
+  // instead of being spliced into the still-finalizing plan run.
+  // -----------------------------------------------------------------------
+  async function promptForNextAction(ctx: ExtensionContext): Promise<void> {
+    try {
+      const idle = await waitForIdle(ctx);
+
+      // Show plan steps (only when truly idle to avoid steer continuation)
+      if (idle && state.todoItems.length > 0) {
+        const todoListText = state.todoItems.map((t, i) => `${i + 1}. ☐ ${t.text}`).join("\n");
+        pi.sendMessage(
+          { customType: "plan-todo-list", content: `**Plan Steps (${state.todoItems.length}):**\n\n${todoListText}`, display: true },
+          { triggerTurn: false },
+        );
+      }
+
+      const choice = await ctx.ui.select("Plan mode — what next?", [
+        "Execute the plan (track progress)",
+        "Stay in plan mode",
+        "Refine the plan",
+      ]);
+
+      if (choice?.startsWith("Execute")) {
+        state = transition(state, { type: "EXECUTE_CHOSEN" });
+
+        await applyModelForPhase(pi, config, state.phase, ctx);
+        applyThinkingForPhase(pi, config, state.phase);
+        pi.setActiveTools(NORMAL_MODE_TOOLS);
+
+        const firstStep = state.todoItems[0]?.text ?? "the plan";
+        const execMessage =
+          `Execute the plan, working through the steps in order. ` +
+          `As you complete each step, include a [DONE:n] tag ` +
+          `(e.g. [DONE:1]) in your reply so progress is tracked. ` +
+          `Start with step 1: ${firstStep}`;
+
+        // Persist a marker so /resume can re-scan [DONE:n] from this point
+        pi.appendEntry("plan-mode-execute", { execMessage });
+
+        // Use sendUserMessage (not sendMessage+triggerTurn) so before_agent_start
+        // fires and injects the execution context with [DONE:n] instructions.
+        if (ctx.isIdle()) {
+          pi.sendUserMessage(execMessage);
+        } else {
+          pi.sendUserMessage(execMessage, { deliverAs: "followUp" });
+        }
+
+        updateStatus(ctx);
+        persistState();
+      } else if (choice === "Refine the plan") {
+        state = transition(state, { type: "REFINE_CHOSEN" });
+        updateStatus(ctx);
+        persistState();
+
+        const refinement = await ctx.ui.editor("Refine the plan:", "");
+        if (refinement?.trim()) {
+          if (ctx.isIdle()) {
+            pi.sendUserMessage(refinement.trim());
+          } else {
+            pi.sendUserMessage(refinement.trim(), { deliverAs: "followUp" });
+          }
+        }
+      }
+      // "Stay in plan mode" — do nothing, user can keep exploring
+    } catch (err) {
+      try {
+        ctx.ui.notify(
+          `Plan mode: prompt failed (${err instanceof Error ? err.message : String(err)})`,
+          "warning",
+        );
+      } catch {
+        // ctx may be stale after a session switch/reload; ignore.
+      }
+    } finally {
+      promptPending = false;
+    }
+  }
 
   // -----------------------------------------------------------------------
   // Event: restore state on session start / resume
@@ -383,10 +466,7 @@ Do NOT attempt to make changes — just describe what you would do.`,
     // Restore persisted state from session entries
     const entries = ctx.sessionManager.getEntries();
     const planModeEntry = entries
-      .filter(
-        (e: { type: string; customType?: string }) =>
-          e.type === "custom" && e.customType === "plan-mode",
-      )
+      .filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "plan-mode")
       .pop() as { data?: PlanModeState & { todos?: PlanModeState["todoItems"] } } | undefined;
 
     const isResume = planModeEntry !== undefined;
@@ -404,12 +484,7 @@ Do NOT attempt to make changes — just describe what you would do.`,
 
     // On resume mid-execution: re-scan messages after the execution start
     // marker to rebuild [DONE:n] completion state.
-    if (
-      isResume &&
-      state.phase === Phase.EXECUTING &&
-      state.todoItems.length > 0
-    ) {
-      // Find the index of the last plan-mode-execute entry
+    if (isResume && state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
       let executeIndex = -1;
       for (let i = entries.length - 1; i >= 0; i--) {
         const entry = entries[i] as { type: string; customType?: string };
@@ -419,18 +494,10 @@ Do NOT attempt to make changes — just describe what you would do.`,
         }
       }
 
-      // Scan all assistant messages after that marker
       const messages: AssistantMessage[] = [];
       for (let i = executeIndex + 1; i < entries.length; i++) {
-        const entry = entries[i] as {
-          type: string;
-          message?: AgentMessage;
-        };
-        if (
-          entry.type === "message" &&
-          entry.message &&
-          isAssistantMessage(entry.message)
-        ) {
+        const entry = entries[i] as { type: string; message?: AgentMessage };
+        if (entry.type === "message" && entry.message && isAssistantMessage(entry.message)) {
           messages.push(entry.message);
         }
       }
@@ -439,11 +506,13 @@ Do NOT attempt to make changes — just describe what you would do.`,
       markCompletedSteps(allText, state.todoItems);
     }
 
-    // Apply the right tool set for the restored phase
+    // Apply the right tool set and thinking for the restored phase
     if (state.phase === Phase.EXECUTING) {
       pi.setActiveTools(NORMAL_MODE_TOOLS);
+      applyThinkingForPhase(pi, config, state.phase);
     } else if (isPlanModeActive(state)) {
-      pi.setActiveTools(PLAN_MODE_TOOLS);
+      pi.setActiveTools(resolvePlanModeTools(pi));
+      applyThinkingForPhase(pi, config, state.phase);
     }
 
     updateStatus(ctx);

@@ -39,7 +39,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // -----------------------------------------------------------------------
   const config = loadConfig();
   let state: PlanModeState = createInitialState();
-  let pendingToggle = false; // Deferred toggle when agent is mid-turn
 
   // -----------------------------------------------------------------------
   // CLI flag
@@ -99,19 +98,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   // Toggle plan mode
   // -----------------------------------------------------------------------
   async function togglePlanMode(ctx: ExtensionContext): Promise<void> {
-    // If the agent is mid-turn, defer the toggle until agent_end
-    if (!ctx.isIdle()) {
-      pendingToggle = !pendingToggle;
-      ctx.ui.notify(
-        pendingToggle
-          ? "Plan mode will toggle on after the current turn."
-          : "Plan mode toggle cancelled.",
-        "info",
-      );
-      return;
-    }
-
-    pendingToggle = false;
     const prev = state;
     state = transition(state, { type: "TOGGLE" });
 
@@ -294,14 +280,6 @@ Do NOT attempt to make changes — just describe what you would do.`,
   // Event: extract plan and prompt user for next action
   // -----------------------------------------------------------------------
   pi.on("agent_end", async (event, ctx) => {
-    // Apply any deferred toggle before processing plan logic
-    if (pendingToggle) {
-      pendingToggle = false;
-      await togglePlanMode(ctx);
-      // If toggle turned plan mode off, skip plan extraction
-      if (!isPlanModeActive(state)) return;
-    }
-
     // Handle execution completion: check if all steps are done
     if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
       if (state.todoItems.every((t) => t.completed)) {

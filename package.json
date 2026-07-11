@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "description": "Plan mode extension for pi — read-only exploration, structured planning, and guided execution with progress tracking",
   "license": "MIT",
+  "keywords": ["pi-package"],
   "pi": {
     "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   }
 }

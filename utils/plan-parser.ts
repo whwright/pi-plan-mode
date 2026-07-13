@@ -34,12 +34,16 @@ export function cleanStepText(text: string): string {
 }
 
 /**
- * Extract numbered todo items from a "Plan:" section in the LLM's response.
- * Looks for a "Plan:" header followed by numbered steps like "1. Do X".
+ * Extract numbered todo items from a "Plan" section in the LLM's response.
+ * Matches various heading formats: "Plan:", "## Plan", "**Plan:**", etc.
+ * Then looks for numbered steps like "1. Do X" or "1) Do X".
  */
 export function extractTodoItems(message: string): TodoItem[] {
   const items: TodoItem[] = [];
-  const headerMatch = message.match(/\*{0,2}Plan:\*{0,2}\s*\n/i);
+
+  // Match a "Plan" header line — supports optional markdown heading (#, ##, ###),
+  // optional bold markers, and optional colon.
+  const headerMatch = message.match(/(?:^|\n)#{0,3}\s*\*{0,2}Plan:?\*{0,2}\s*\n/i);
   if (!headerMatch) return items;
 
   const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length);

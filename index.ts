@@ -90,6 +90,8 @@ function hasQuestionnaire(pi: ExtensionAPI): boolean {
 export default function planModeExtension(pi: ExtensionAPI): void {
   const config = createPlanModeConfig();
   let state: PlanModeState = createInitialState();
+  let completedStepsInRun = 0;
+  let executionContinuationPending = false;
   let promptPending = false;
 
   // -----------------------------------------------------------------------
@@ -306,8 +308,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 Remaining steps:
 ${todoList}
 
-Execute each step in order.
-After completing a step, include a [DONE:n] tag in your response (e.g. [DONE:1]).`,
+Execute the entire remaining plan autonomously and in order. [DONE:n] markers are
+progress milestones only; they are not handoff points and never require a user
+prompt. Do not stop after an item or ask the user to continue. Continue working
+until every remaining step is complete. Pause only when genuinely blocked by
+missing information or an irreversible decision that requires the user's input.
+After completing each step, include a [DONE:n] tag in your response (e.g. [DONE:1]).`,
           display: false,
         },
       };
@@ -352,16 +358,45 @@ Do NOT attempt to make changes — just describe what you would do.`,
   // -----------------------------------------------------------------------
   // Event: track [DONE:n] markers after each turn
   // -----------------------------------------------------------------------
+  pi.on("agent_start", async () => {
+    if (state.phase === Phase.EXECUTING) completedStepsInRun = 0;
+  });
+
   pi.on("turn_end", async (event, ctx) => {
     if (state.phase !== Phase.EXECUTING || state.todoItems.length === 0) return;
     if (!isAssistantMessage(event.message)) return;
 
     const text = getTextContent(event.message);
-    if (markCompletedSteps(text, state.todoItems) > 0) {
+    const completed = markCompletedSteps(text, state.todoItems);
+    completedStepsInRun += completed;
+    if (completed > 0) {
       updateStatus(ctx);
       persistState();
     }
   });
+
+  function continueExecutionWhenIdle(ctx: ExtensionContext): void {
+    if (executionContinuationPending) return;
+    executionContinuationPending = true;
+
+    void (async () => {
+      try {
+        if (
+          await waitForIdle(ctx) &&
+          state.phase === Phase.EXECUTING &&
+          state.todoItems.some((item) => !item.completed)
+        ) {
+          pi.sendUserMessage(
+            "Continue executing the remaining plan now. Do not stop at [DONE] markers; complete every remaining step before responding.",
+          );
+        }
+      } catch {
+        // The session may have changed while the prior run was finalizing.
+      } finally {
+        executionContinuationPending = false;
+      }
+    })();
+  }
 
   // -----------------------------------------------------------------------
   // Event: extract plan, check execution completion
@@ -382,6 +417,9 @@ Do NOT attempt to make changes — just describe what you would do.`,
         pi.setActiveTools(NORMAL_MODE_TOOLS);
         updateStatus(ctx);
         persistState();
+      } else if (completedStepsInRun > 0) {
+        // A progress marker must never make the user restart execution.
+        continueExecutionWhenIdle(ctx);
       }
       return;
     }
@@ -446,9 +484,9 @@ Do NOT attempt to make changes — just describe what you would do.`,
 
         const firstStep = state.todoItems[0]?.text ?? "the plan";
         const execMessage =
-          `Execute the plan, working through the steps in order. ` +
-          `As you complete each step, include a [DONE:n] tag ` +
-          `(e.g. [DONE:1]) in your reply so progress is tracked. ` +
+          `Execute the entire plan autonomously, working through every step in order ` +
+          `without waiting for another prompt. [DONE:n] tags (e.g. [DONE:1]) are ` +
+          `progress milestones, not stopping points. Continue until all steps are complete. ` +
           `Start with step 1: ${firstStep}`;
 
         // Persist a marker so /resume can re-scan [DONE:n] from this point

@@ -8,7 +8,9 @@
  * Commands:
  *   /plan          — Toggle plan mode on/off
  *   Ctrl+Alt+P     — Toggle plan mode (shortcut)
- *   --plan         — CLI flag to start in plan mode
+ *
+ * Drafted plans open in Plannotator's browser review when the
+ * @plannotator/pi-extension is installed; otherwise a TUI prompt is shown.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -29,9 +31,15 @@ import {
   transition,
   type PlanModeState,
 } from "./state.js";
-import { extractTodoItems, isSafeCommand, markCompletedSteps } from "./utils/index.js";
+import { extractPlanText, extractTodoItems, isSafeCommand, markCompletedSteps } from "./utils/index.js";
 import { applyModelForPhase, applyThinkingForPhase } from "./thinking.js";
 import { showPlanSettings } from "./settings-ui.js";
+import {
+  onPlanReviewResult,
+  queryReviewStatus,
+  requestPlanReview,
+  type PlannotatorReviewResultEvent,
+} from "./plannotator-client.js";
 
 /** Read-only tools available during the planning / exploration phase. */
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
@@ -100,15 +108,16 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let completedStepsInRun = 0;
   let executionContinuationPending = false;
   let promptPending = false;
-
-  // -----------------------------------------------------------------------
-  // CLI flag
-  // -----------------------------------------------------------------------
-  pi.registerFlag("plan", {
-    description: "Start in plan mode (read-only exploration)",
-    type: "boolean",
-    default: false,
-  });
+  /** Latest context, for bus-event handlers that receive none. */
+  let lastCtx: ExtensionContext | undefined;
+  /** Raw markdown of the most recently extracted plan, for browser review. */
+  let lastPlanText: string | null = null;
+  /** Plan text last sent to Plannotator — used to detect superseded drafts. */
+  let lastReviewedPlanText: string | null = null;
+  /** A browser verdict waiting for a clean handoff to the agent. */
+  let pendingReviewVerdict: { ctx: ExtensionContext; event: PlannotatorReviewResultEvent } | null = null;
+  let reviewVerdictProcessing = false;
+  let reviewVerdictRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
   // -----------------------------------------------------------------------
   // Footer status & progress widget
@@ -129,7 +138,10 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       });
       ctx.ui.setWidget("plan-todos", lines);
     } else if (isPlanModeActive(state)) {
-      ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("warning", "⏸ plan"));
+      const label = state.phase === Phase.PLAN_READY && state.pendingReviewId
+        ? "⏸ plan · reviewing"
+        : "⏸ plan";
+      ctx.ui.setStatus("plan-mode", ctx.ui.theme.fg("warning", label));
       ctx.ui.setWidget("plan-todos", undefined);
     } else {
       ctx.ui.setStatus("plan-mode", undefined);
@@ -147,6 +159,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       previousModel: state.previousModel,
       previousEffort: state.previousEffort,
       previousTools: state.previousTools,
+      pendingReviewId: state.pendingReviewId,
+      planText: lastPlanText ?? undefined,
     });
   }
 
@@ -235,6 +249,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       config.implModel = updated.implModel;
       config.planEffort = updated.planEffort;
       config.implEffort = updated.implEffort;
+      config.plannotatorReview = updated.plannotatorReview;
 
       // Persist to file so settings survive all sessions
       await saveConfigToFile(config);
@@ -412,6 +427,8 @@ Do NOT attempt to make changes — just describe what you would do.`,
   // and fire-and-forget the prompt via poll-then-show.
   // -----------------------------------------------------------------------
   pi.on("agent_end", async (event, ctx) => {
+    lastCtx = ctx;
+
     // Check if execution is complete
     if (state.phase === Phase.EXECUTING && state.todoItems.length > 0) {
       if (state.todoItems.every((t) => t.completed)) {
@@ -431,12 +448,30 @@ Do NOT attempt to make changes — just describe what you would do.`,
     if (!isPlanModeActive(state) || !ctx.hasUI) return;
     if (state.phase !== Phase.PLANNING && state.phase !== Phase.PLAN_READY) return;
 
+    // A browser verdict is already associated with this plan. Do not open a
+    // second review while its execution/refinement handoff is waiting for the
+    // agent to become idle.
+    if (pendingReviewVerdict) {
+      processPendingReviewVerdict();
+      return;
+    }
+
     // Extract plan from last assistant message
     const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
     if (lastAssistant) {
-      const items = extractTodoItems(getTextContent(lastAssistant));
+      const text = getTextContent(lastAssistant);
+      const items = extractTodoItems(text);
       if (items.length > 0) {
+        const planText = extractPlanText(text) ?? text;
+        const planChanged = lastPlanText !== null && planText !== lastPlanText;
         state = transition(state, { type: "PLAN_EXTRACTED", items });
+        lastPlanText = planText;
+        // A new draft supersedes the old browser review. Its verdict must not
+        // be applied to the newly extracted plan if the user later decides it.
+        if (planChanged && state.pendingReviewId) {
+          state = { ...state, pendingReviewId: undefined };
+          persistState();
+        }
       }
     }
 
@@ -445,15 +480,205 @@ Do NOT attempt to make changes — just describe what you would do.`,
     // respond naturally without the prompt blocking them.
     if (state.todoItems.length === 0) return;
 
+    // A browser review for this exact draft is already awaiting a verdict.
+    // If the plan changed since, fall through and open a fresh review — an
+    // abandoned or superseded review must never deadlock the session.
+    if (
+      state.pendingReviewId &&
+      lastPlanText !== null &&
+      lastPlanText === lastReviewedPlanText
+    ) {
+      ctx.ui.notify("Plan review is open in your browser — awaiting your decision.", "info");
+      return;
+    }
+
     // Prevent duplicate prompts
     if (promptPending) return;
     promptPending = true;
 
-    // Fire-and-forget: poll until idle, then show the prompt.
+    // Fire-and-forget: poll until idle, then open the Plannotator browser
+    // review (falling back to the TUI prompt when Plannotator is absent).
     // This lets agent_end return immediately so pi can finalize the run
     // and clear the spinner.
-    void promptForNextAction(ctx);
+    attemptBrowserReview(ctx);
   });
+
+  // -----------------------------------------------------------------------
+  // Execution / refinement helpers — shared by the TUI prompt fallback and
+  // the Plannotator browser verdicts.
+  // -----------------------------------------------------------------------
+  async function startExecution(ctx: ExtensionContext, reviewerNotes?: string): Promise<void> {
+    state = transition(state, { type: "EXECUTE_CHOSEN" });
+
+    await applyModelForPhase(pi, config, state.phase, ctx);
+    applyThinkingForPhase(pi, config, state.phase);
+    pi.setActiveTools(resolveNormalModeTools(pi, state.previousTools));
+
+    const firstStep = state.todoItems[0]?.text ?? "the plan";
+    let execMessage =
+      `Execute the entire plan autonomously, working through every step in order ` +
+      `without waiting for another prompt. [DONE:n] tags (e.g. [DONE:1]) are ` +
+      `progress milestones, not stopping points. Continue until all steps are complete. ` +
+      `Start with step 1: ${firstStep}`;
+    if (reviewerNotes?.trim()) {
+      execMessage += `\n\nImplementation notes from the plan reviewer:\n${reviewerNotes.trim()}`;
+    }
+
+    // Persist a marker so /resume can re-scan [DONE:n] from this point
+    pi.appendEntry("plan-mode-execute", { execMessage });
+
+    // Use sendUserMessage (not sendMessage+triggerTurn) so before_agent_start
+    // fires and injects the execution context with [DONE:n] instructions.
+    if (ctx.isIdle()) {
+      pi.sendUserMessage(execMessage);
+    } else {
+      pi.sendUserMessage(execMessage, { deliverAs: "followUp" });
+    }
+
+    updateStatus(ctx);
+    persistState();
+  }
+
+  function sendRefinement(ctx: ExtensionContext, feedback: string): void {
+    state = transition(state, { type: "REFINE_CHOSEN" });
+    updateStatus(ctx);
+    persistState();
+
+    if (ctx.isIdle()) {
+      pi.sendUserMessage(feedback);
+    } else {
+      pi.sendUserMessage(feedback, { deliverAs: "followUp" });
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Plannotator browser review
+  // -----------------------------------------------------------------------
+
+  /** Retry a verdict handoff until the agent is idle. */
+  function processPendingReviewVerdict(): void {
+    if (!pendingReviewVerdict || reviewVerdictProcessing) return;
+
+    const pending = pendingReviewVerdict;
+    reviewVerdictProcessing = true;
+    void (async () => {
+      try {
+        if (!(await waitForIdle(pending.ctx))) {
+          pending.ctx.ui.notify(
+            "Plan review decision received; waiting for the current turn to finish before continuing.",
+            "info",
+          );
+          reviewVerdictRetryTimer = setTimeout(() => {
+            reviewVerdictRetryTimer = undefined;
+            reviewVerdictProcessing = false;
+            processPendingReviewVerdict();
+          }, 1000);
+          return;
+        }
+
+        // A session switch, mode toggle, or newer verdict may have superseded this one.
+        if (pendingReviewVerdict !== pending) return;
+        if (state.phase !== Phase.PLAN_READY) {
+          pendingReviewVerdict = null;
+          return;
+        }
+        pendingReviewVerdict = null;
+
+        if (pending.event.approved) {
+          await startExecution(pending.ctx, pending.event.feedback);
+        } else {
+          const feedback = pending.event.feedback?.trim() ||
+            "The reviewer rejected the plan without comments. Please revise it.";
+          sendRefinement(
+            pending.ctx,
+            `Plan review feedback (annotations from the reviewer):\n\n${feedback}\n\n` +
+              `Revise the plan accordingly and output the updated numbered plan under a "Plan:" header.`,
+          );
+        }
+      } catch {
+        // ctx may be stale after a session switch/reload; ignore.
+        pendingReviewVerdict = null;
+      } finally {
+        reviewVerdictProcessing = false;
+      }
+    })();
+  }
+
+  /** Execute or refine according to an accepted browser verdict. */
+  function applyVerdict(ctx: ExtensionContext, event: PlannotatorReviewResultEvent): void {
+    if (pendingReviewVerdict) return;
+
+    pendingReviewVerdict = { ctx, event };
+    state = { ...state, pendingReviewId: undefined };
+    persistState();
+    updateStatus(ctx);
+    processPendingReviewVerdict();
+  }
+
+  /** Route a browser verdict into execution or refinement. */
+  function handleReviewResult(ctx: ExtensionContext, event: PlannotatorReviewResultEvent): void {
+    if (state.phase !== Phase.PLAN_READY) return;
+
+    // The shared bus carries results for every Plannotator session. Only the
+    // review explicitly persisted for this plan may control this extension.
+    if (!state.pendingReviewId || event.reviewId !== state.pendingReviewId) return;
+
+    applyVerdict(ctx, event);
+  }
+
+  /**
+   * Try to open the drafted plan in Plannotator's browser review.
+   * Falls back to the TUI prompt when Plannotator is absent or fails.
+   */
+  function attemptBrowserReview(ctx: ExtensionContext): void {
+    void (async () => {
+      try {
+        const idle = await waitForIdle(ctx);
+        if (!idle || state.phase !== Phase.PLAN_READY) {
+          if (!idle) {
+            ctx.ui.notify("Plan review could not be opened while the agent was busy.", "warning");
+            reviewVerdictRetryTimer = setTimeout(() => {
+              reviewVerdictRetryTimer = undefined;
+              if (state.phase === Phase.PLAN_READY && !promptPending) {
+                promptPending = true;
+                attemptBrowserReview(ctx);
+              }
+            }, 1000);
+          }
+          return;
+        }
+        if (!config.plannotatorReview || !lastPlanText) {
+          await promptForNextAction(ctx);
+          return;
+        }
+
+        const review = await requestPlanReview(pi, lastPlanText);
+        if (!review) {
+          // Plannotator not installed / unavailable — TUI fallback.
+          await promptForNextAction(ctx);
+          return;
+        }
+
+        lastReviewedPlanText = lastPlanText;
+        state = { ...state, pendingReviewId: review.reviewId };
+        persistState();
+        updateStatus(ctx);
+        ctx.ui.notify(
+          "Plan opened in Plannotator — approve or annotate in your browser.",
+          "info",
+        );
+      } catch {
+        // Fall back to the TUI prompt on any unexpected failure.
+        try {
+          await promptForNextAction(ctx);
+        } catch {
+          // ctx may be stale after a session switch/reload; ignore.
+        }
+      } finally {
+        promptPending = false;
+      }
+    })();
+  }
 
   // -----------------------------------------------------------------------
   // Show the post-plan prompt — runs AFTER the agent is fully idle.
@@ -463,9 +688,13 @@ Do NOT attempt to make changes — just describe what you would do.`,
   async function promptForNextAction(ctx: ExtensionContext): Promise<void> {
     try {
       const idle = await waitForIdle(ctx);
+      if (!idle) {
+        ctx.ui.notify("Plan mode is still waiting for the agent to become idle.", "warning");
+        return;
+      }
 
-      // Show plan steps (only when truly idle to avoid steer continuation)
-      if (idle && state.todoItems.length > 0) {
+      // Show plan steps only when truly idle to avoid a steer continuation.
+      if (state.todoItems.length > 0) {
         const todoListText = state.todoItems.map((t, i) => `${i + 1}. ☐ ${t.text}`).join("\n");
         pi.sendMessage(
           { customType: "plan-todo-list", content: `**Plan Steps (${state.todoItems.length}):**\n\n${todoListText}`, display: true },
@@ -480,44 +709,11 @@ Do NOT attempt to make changes — just describe what you would do.`,
       ]);
 
       if (choice?.startsWith("Execute")) {
-        state = transition(state, { type: "EXECUTE_CHOSEN" });
-
-        await applyModelForPhase(pi, config, state.phase, ctx);
-        applyThinkingForPhase(pi, config, state.phase);
-        pi.setActiveTools(resolveNormalModeTools(pi, state.previousTools));
-
-        const firstStep = state.todoItems[0]?.text ?? "the plan";
-        const execMessage =
-          `Execute the entire plan autonomously, working through every step in order ` +
-          `without waiting for another prompt. [DONE:n] tags (e.g. [DONE:1]) are ` +
-          `progress milestones, not stopping points. Continue until all steps are complete. ` +
-          `Start with step 1: ${firstStep}`;
-
-        // Persist a marker so /resume can re-scan [DONE:n] from this point
-        pi.appendEntry("plan-mode-execute", { execMessage });
-
-        // Use sendUserMessage (not sendMessage+triggerTurn) so before_agent_start
-        // fires and injects the execution context with [DONE:n] instructions.
-        if (ctx.isIdle()) {
-          pi.sendUserMessage(execMessage);
-        } else {
-          pi.sendUserMessage(execMessage, { deliverAs: "followUp" });
-        }
-
-        updateStatus(ctx);
-        persistState();
+        await startExecution(ctx);
       } else if (choice === "Refine the plan") {
-        state = transition(state, { type: "REFINE_CHOSEN" });
-        updateStatus(ctx);
-        persistState();
-
         const refinement = await ctx.ui.editor("Refine the plan:", "");
         if (refinement?.trim()) {
-          if (ctx.isIdle()) {
-            pi.sendUserMessage(refinement.trim());
-          } else {
-            pi.sendUserMessage(refinement.trim(), { deliverAs: "followUp" });
-          }
+          sendRefinement(ctx, refinement.trim());
         }
       }
       // "Stay in plan mode" — do nothing, user can keep exploring
@@ -536,21 +732,18 @@ Do NOT attempt to make changes — just describe what you would do.`,
   }
 
   // -----------------------------------------------------------------------
+  // Plannotator browser verdicts arrive on the shared event bus (no ctx).
+  // -----------------------------------------------------------------------
+  onPlanReviewResult(pi, (event) => {
+    if (!lastCtx) return;
+    handleReviewResult(lastCtx, event);
+  });
+
+  // -----------------------------------------------------------------------
   // Event: restore state on session start / resume
   // -----------------------------------------------------------------------
   pi.on("session_start", async (_event, ctx) => {
-    // Honor --plan flag
-    if (pi.getFlag("plan") === true) {
-      state = transition(state, { type: "TOGGLE" });
-      state = {
-        ...state,
-        previousModel: ctx.model
-          ? { provider: ctx.model.provider, id: ctx.model.id }
-          : state.previousModel,
-        previousEffort: pi.getThinkingLevel(),
-        previousTools: pi.getActiveTools(),
-      };
-    }
+    lastCtx = ctx;
 
     // Restore persisted config from file
     const entries = ctx.sessionManager.getEntries();
@@ -558,7 +751,7 @@ Do NOT attempt to make changes — just describe what you would do.`,
 
     const planModeEntry = entries
       .filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "plan-mode")
-      .pop() as { data?: PlanModeState & { todos?: PlanModeState["todoItems"] } } | undefined;
+      .pop() as { data?: PlanModeState & { todos?: PlanModeState["todoItems"]; planText?: string } } | undefined;
 
     const isResume = planModeEntry !== undefined;
 
@@ -570,7 +763,57 @@ Do NOT attempt to make changes — just describe what you would do.`,
         previousModel: planModeEntry.data.previousModel ?? state.previousModel,
         previousEffort: planModeEntry.data.previousEffort ?? state.previousEffort,
         previousTools: planModeEntry.data.previousTools ?? state.previousTools,
+        pendingReviewId: planModeEntry.data.pendingReviewId ?? state.pendingReviewId,
       };
+      if (planModeEntry.data.planText) {
+        lastPlanText = planModeEntry.data.planText;
+      }
+    }
+
+    // Recover a Plannotator review that was pending when the session ended.
+    if (state.phase === Phase.PLAN_READY && state.pendingReviewId) {
+      // The persisted plan is the review currently open in the browser. Keep
+      // the duplicate-draft guard warm across a session reload as well.
+      if (lastPlanText) lastReviewedPlanText = lastPlanText;
+      const reviewId = state.pendingReviewId;
+      void (async () => {
+        try {
+          const status = await queryReviewStatus(pi, reviewId);
+          if (status?.status === "completed") {
+            // The verdict arrived while we were away — act on it.
+            handleReviewResult(ctx, status);
+            return;
+          }
+          if (status?.status === "pending") {
+            ctx.ui.notify(
+              "Plan review is still open in your browser — awaiting your decision.",
+              "info",
+            );
+            return;
+          }
+          if (status?.status === "missing") {
+            state = { ...state, pendingReviewId: undefined };
+            persistState();
+            updateStatus(ctx);
+            if (state.todoItems.length > 0 && !promptPending) {
+              promptPending = true;
+              attemptBrowserReview(ctx);
+            }
+            return;
+          }
+          // Plannotator is unavailable. Discard this browser handoff and use
+          // the terminal prompt; any late result for the old ID is ignored.
+          state = { ...state, pendingReviewId: undefined };
+          persistState();
+          updateStatus(ctx);
+          if (state.todoItems.length > 0 && !promptPending) {
+            promptPending = true;
+            await promptForNextAction(ctx);
+          }
+        } catch {
+          // ctx may be stale after a session switch/reload; ignore.
+        }
+      })();
     }
 
     // On resume mid-execution: re-scan messages after the execution start

@@ -10,12 +10,13 @@ By default, plan mode only changes the thinking effort level (xhigh ↔ low) and
 ## Quick Start
 
 ```bash
-# Start pi in plan mode
-pi --plan
-
-# Or toggle plan mode during a session
+# Toggle plan mode during a session
 /plan
 ```
+
+> **Note:** The `--plan` CLI flag is intentionally not registered by this
+> extension — it belongs to `@plannotator/pi-extension`, and registering it
+> here would conflict at startup.
 
 ## Usage
 
@@ -29,7 +30,8 @@ pi --plan
                  2. Add state machine types
                  3. Implement transition function
 
-/plan again    → Choose: Execute / Refine / Stay
+/plan again    → Plannotator review (see below), or fallback prompt:
+                 Execute / Refine / Stay
 
   "Execute"     → Switches to execution mode (full tools, low thinking).
                    Agent implements each step, marking progress with [DONE:n] tags.
@@ -41,6 +43,37 @@ pi --plan
 
 Ctrl+Alt+P     → Toggle plan mode (shortcut)
 ```
+
+## Plannotator integration
+
+When the official [Plannotator](https://github.com/backnotprop/plannotator)
+extension is installed alongside this one:
+
+```bash
+pi install npm:@plannotator/pi-extension
+```
+
+…a drafted plan automatically opens in Plannotator's browser review instead
+of the terminal prompt. There you can:
+
+- **Approve** — the plan executes here with the usual progress tracking
+- **Approve with notes** — execution begins and your notes are passed to the
+  implementing agent
+- **Deny with annotations** — your inline comments are sent back to the agent,
+  which revises the plan and resubmits it for another review round
+
+If Plannotator is not installed (or fails to respond within 5 seconds), the
+classic **Execute / Refine / Stay** TUI prompt appears instead — nothing
+changes for users without it.
+
+The integration communicates over pi's shared extension event bus
+(`plannotator:request` / `plannotator:review-result`), so there is no npm
+dependency on Plannotator itself.
+
+### Disabling the browser review
+
+- Toggle "Plannotator review" off in `/plan-settings`, or
+- Set `PI_PLAN_MODE_PLANNOTATOR_REVIEW=0` in your environment.
 
 Progress widget during execution:
 

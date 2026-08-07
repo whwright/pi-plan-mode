@@ -250,6 +250,7 @@ export async function showPlanSettings(
     implModel: config.implModel ? { ...config.implModel } : undefined,
     planEffort: config.planEffort,
     implEffort: config.implEffort,
+    plannotatorReview: config.plannotatorReview,
   };
 
   // eslint-disable-next-line no-constant-condition
@@ -259,6 +260,7 @@ export async function showPlanSettings(
       `Plan model:      ${modelLabel(draft.planModel)}`,
       `Impl thinking:   ${draft.implEffort}`,
       `Impl model:      ${modelLabel(draft.implModel)}`,
+      `Plannotator review: ${draft.plannotatorReview ? "on" : "off"}`,
       "💾 Save and close",
     ];
 
@@ -279,6 +281,12 @@ export async function showPlanSettings(
     } else if (choice.startsWith("Impl model")) {
       const model = await pickModel(ctx, pi, "implementation model", draft.implModel);
       if (model !== null) draft.implModel = model;
+    } else if (choice.startsWith("Plannotator review")) {
+      const toggle = await ctx.ui.select("Open drafted plans in Plannotator for browser review?", [
+        `${draft.plannotatorReview ? "✓ " : ""}On (browser review, TUI prompt as fallback)`,
+        `${draft.plannotatorReview ? "" : "✓ "}Off (always use the TUI prompt)`,
+      ]);
+      if (toggle) draft.plannotatorReview = toggle.replace(/^✓ /, "").startsWith("On");
     }
   }
 

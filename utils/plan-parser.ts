@@ -66,6 +66,19 @@ export function extractTodoItems(message: string): TodoItem[] {
 }
 
 /**
+ * Extract the raw plan markdown from the "Plan:" header to the end of the
+ * message. Returns null when no plan header exists. Used as the planContent
+ * sent to the Plannotator browser review.
+ */
+export function extractPlanText(message: string): string | null {
+  const headerMatch = message.match(/(?:^|\n)#{0,3}\s*\*{0,2}Plan:?\*{0,2}\s*\n/i);
+  if (!headerMatch) return null;
+  const start = message.indexOf(headerMatch[0]);
+  const text = message.slice(start).trim();
+  return text.length > 0 ? text : null;
+}
+
+/**
  * Scan text for [DONE:n] markers and return the step numbers found.
  */
 export function extractDoneSteps(text: string): number[] {

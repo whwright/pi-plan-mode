@@ -55,6 +55,10 @@ pi-plan-mode/
 ├── settings-ui.ts           # Interactive /plan-settings UI — SelectList
 │                            # for model picking (filter-as-you-type) and
 │                            # effort level selection.
+├── plannotator-client.ts    # Client for Plannotator's shared event bus
+│                            # (pi.events only — no npm dependency). Plain
+│                            # string channels, local type copies, 5s
+│                            # timeout-guarded requests.
 ├── tools.ts                 # PLAN_MODE_TOOLS, NORMAL_MODE_TOOLS constants
 │                            # applyToolSet(pi, phase) helper
 ├── thinking.ts              # applyThinkingLevel(pi, config, phase) helper
@@ -83,8 +87,8 @@ pi-plan-mode/
                     │
     ┌───────────────▼───────────────┐
     │         PLAN_READY            │  plan steps extracted
-    │   (xhigh thinking by default) │  user prompted: execute/refine/stay
-    │                              │
+    │   (xhigh thinking by default) │  Plannotator browser review opens
+    │   pendingReviewId: review id  │  (fallback: TUI execute/refine/stay)
     └──┬──────────────┬────────────┘
        │              │
        │ "Execute"    │ "Refine"
@@ -128,7 +132,6 @@ Settings persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 
 | API | Purpose |
 |-----|---------|
-| `pi.registerFlag("plan", ...)` | `--plan` CLI flag to start in plan mode |
 | `pi.registerCommand("plan", ...)` | `/plan` command to toggle plan mode |
 | `pi.registerShortcut(...)` | `Ctrl+Alt+P` to toggle |
 | `pi.on("tool_call", ...)` | Block destructive bash commands in planning |
@@ -144,7 +147,6 @@ Settings persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 | `pi.appendEntry(...)` | Persist state across session restarts |
 | `pi.sendMessage(...)` | Inject progress messages |
 | `pi.sendUserMessage(...)` | Trigger turns for refinement |
-| `pi.getFlag("plan")` | Check `--plan` flag on startup |
 | `ctx.ui.setStatus(...)` | Footer status indicator |
 | `ctx.ui.setWidget(...)` | Progress widget above editor |
 | `ctx.ui.select(...)` | Post-plan user prompt |
@@ -152,6 +154,7 @@ Settings persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 | `ctx.ui.notify(...)` | Notifications |
 | `ctx.modelRegistry.find(...)` | Find model for optional overrides |
 | `ctx.model` | Snapshot current model before switching |
+| `pi.events.emit/on(...)` | Plannotator shared bus: `plannotator:request` (plan-review, review-status) and `plannotator:review-result` |
 
 ---
 
@@ -173,6 +176,10 @@ Settings persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 ### What goes in the extension wiring (uses pi)
 
 - `index.ts` — All event registrations, command handlers, shortcut handlers.
+- `plannotator-client.ts` — Shared-bus client for the sibling
+  `@plannotator/pi-extension`: `requestPlanReview()`, `onPlanReviewResult()`,
+  `queryReviewStatus()`. Every call times out after 5s and degrades to the
+  built-in TUI prompt when Plannotator is absent.
 - `tools.ts` — Tool-set constants and `applyToolSet()` (calls `pi.setActiveTools`).
 - `thinking.ts` — `applyThinkingLevel()` (calls `pi.setThinkingLevel`), `applyModel()` (calls `pi.setModel`).
 - `tracking.ts` — Widget/status updates (calls `ctx.ui.*`), persistence (calls `pi.appendEntry`).

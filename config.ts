@@ -40,6 +40,8 @@ export interface PlanModeConfig {
   planEffort: ThinkingLevel;
   /** Thinking effort during execution (defaults to "low"). */
   implEffort: ThinkingLevel;
+  /** Open drafted plans in Plannotator for browser review (defaults to true). */
+  plannotatorReview: boolean;
 }
 
 /** JSON-serializable form of the config for persistence. */
@@ -48,6 +50,7 @@ export interface SerializedConfig {
   implModel?: { provider: string; modelId: string } | null;
   planEffort?: ThinkingLevel;
   implEffort?: ThinkingLevel;
+  plannotatorReview?: boolean;
 }
 
 /** Path to the persisted settings file. */
@@ -62,9 +65,14 @@ const DEFAULT_IMPL_EFFORT: ThinkingLevel = "low";
  * Call /plan-settings to override, loadConfigFromFile to restore.
  */
 export function createPlanModeConfig(): PlanModeConfig {
+  const envReview = process.env.PI_PLAN_MODE_PLANNOTATOR_REVIEW;
+  const plannotatorReview = envReview === undefined
+    ? true
+    : !(envReview === "0" || envReview.toLowerCase() === "false");
   return {
     planEffort: DEFAULT_PLAN_EFFORT,
     implEffort: DEFAULT_IMPL_EFFORT,
+    plannotatorReview,
   };
 }
 
@@ -100,6 +108,7 @@ export function serializeConfig(config: PlanModeConfig): SerializedConfig {
     implModel: config.implModel ? { provider: config.implModel.provider, modelId: config.implModel.modelId } : null,
     planEffort: config.planEffort,
     implEffort: config.implEffort,
+    plannotatorReview: config.plannotatorReview,
   };
 }
 
@@ -116,5 +125,8 @@ export function applySerializedConfig(config: PlanModeConfig, data: Partial<Seri
   }
   if (data.implEffort !== undefined) {
     config.implEffort = data.implEffort;
+  }
+  if (data.plannotatorReview !== undefined) {
+    config.plannotatorReview = data.plannotatorReview;
   }
 }

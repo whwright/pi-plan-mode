@@ -3,7 +3,7 @@
  *
  * Defaults: current model, xhigh thinking for planning, low for execution.
  * Override via /plan-settings — settings persist to
- * ~/.pi/extensions/pi-plan-mode/config.json and survive all sessions.
+ * ~/.pi/agent/extensions/pi-plan-mode/config.json and survive all sessions.
  *
  * Priority: config.json > defaults.
  */
@@ -51,7 +51,7 @@ export interface SerializedConfig {
 }
 
 /** Path to the persisted settings file. */
-const CONFIG_PATH = `${homedir()}/.pi/extensions/pi-plan-mode/config.json`;
+const CONFIG_PATH = `${homedir()}/.pi/agent/extensions/pi-plan-mode/config.json`;
 
 /** Default thinking levels. */
 const DEFAULT_PLAN_EFFORT: ThinkingLevel = "xhigh";
@@ -69,7 +69,7 @@ export function createPlanModeConfig(): PlanModeConfig {
 }
 
 /**
- * Load persisted settings from ~/.pi/extensions/pi-plan-mode/config.json
+ * Load persisted settings from ~/.pi/agent/extensions/pi-plan-mode/config.json
  * and apply them on top of a live config. Returns true if file was loaded.
  */
 export async function loadConfigFromFile(config: PlanModeConfig): Promise<boolean> {
@@ -85,7 +85,7 @@ export async function loadConfigFromFile(config: PlanModeConfig): Promise<boolea
 }
 
 /**
- * Write the current config to ~/.pi/extensions/pi-plan-mode/config.json.
+ * Write the current config to ~/.pi/agent/extensions/pi-plan-mode/config.json.
  */
 export async function saveConfigToFile(config: PlanModeConfig): Promise<void> {
   const dir = dirname(CONFIG_PATH);

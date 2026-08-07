@@ -120,7 +120,7 @@ Phases:
 Defaults: current model for both phases, `xhigh` planning effort, `low` execution effort.
 
 Override via `/plan-settings` — an interactive menu with a fuzzy-searchable model picker.
-Settings persist to `~/.pi/extensions/pi-plan-mode/config.json`.
+Settings persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 
 ---
 

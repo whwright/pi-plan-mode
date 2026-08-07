@@ -342,12 +342,13 @@ This is a two-effort workflow: you plan on ${config.planEffort} effort, and the 
 
 ${clarifyLine}
 
-Create a detailed numbered plan under a "Plan:" header:
+Create a detailed numbered plan under a "Plan:" header. Use EXACTLY the format
+shown below — plain numbered list items, no markdown headings, no bold, no
+"###" prefixes:
 
 Plan:
 1. First step — what to change and why
 2. Second step — what to change and why
-...
 
 Do NOT attempt to make changes — just describe what you would do.`,
         display: false,

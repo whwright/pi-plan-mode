@@ -47,7 +47,7 @@ export function extractTodoItems(message: string): TodoItem[] {
   if (!headerMatch) return items;
 
   const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length);
-  const numberedPattern = /^\s*(\d+)[.)]\s+\*{0,2}([^*\n]+)/gm;
+  const numberedPattern = /^\s*(?:#{1,3}\s+)?(\d+)[.)]\s+\*{0,2}([^*\n]+)/gm;
 
   for (const match of planSection.matchAll(numberedPattern)) {
     const text = match[2]

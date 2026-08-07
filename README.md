@@ -61,7 +61,7 @@ Use the `/plan-settings` command to interactively configure plan mode. This open
 - **Implementation thinking effort** — Defaults to `low`
 - **Implementation model** — Defaults to your session's current model
 
-Model selection uses a fuzzy-searchable list — type characters to narrow results. Settings are persisted across all sessions in `~/.pi/extensions/pi-plan-mode/config.json`.
+Model selection uses a fuzzy-searchable list — type characters to narrow results. Settings are persisted across all sessions in `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 
 ```
 /plan-settings

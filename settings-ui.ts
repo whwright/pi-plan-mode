@@ -10,6 +10,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 
 import {
@@ -50,22 +51,15 @@ function modelSelectValue(m: ModelRef | undefined): string {
 // Effort level helpers — model-aware filtering
 // ---------------------------------------------------------------------------
 
-/**
- * Derive the set of thinking levels a model actually supports.
- *
- * - Non-reasoning models support only `"off"`.
- * - If the model has a `thinkingLevelMap`, levels mapped to `null` are
- *   unsupported; omitted or string-valued levels are supported.
- * - If neither condition applies, all standard levels are shown (backward
- *   compatibility).
- */
-function supportedLevels(
-  reasoning: boolean | undefined,
-  thinkingLevelMap: Record<string, string | null> | undefined,
-): ThinkingLevel[] {
-  if (reasoning === false) return ["off"];
-  if (!thinkingLevelMap) return [...EFFORT_LEVELS];
-  return EFFORT_LEVELS.filter((lvl) => thinkingLevelMap[lvl] !== null);
+function supportedLevels(model: Model<Api> | undefined): ThinkingLevel[] {
+  if (!model) return [...EFFORT_LEVELS];
+
+  // Keep this list in lockstep with pi's built-in thinking selector. In
+  // particular, omitted map entries do not mean that every level is valid:
+  // pi treats xhigh/max as unsupported unless they are explicitly mapped.
+  return getSupportedThinkingLevels(model).filter(
+    (level): level is ThinkingLevel => EFFORT_LEVELS.includes(level as ThinkingLevel),
+  );
 }
 
 /**
@@ -91,7 +85,7 @@ function clampLevel(level: ThinkingLevel, supported: ThinkingLevel[]): ThinkingL
 function resolveEffortModel(
   ctx: ExtensionCommandContext,
   modelRef: ModelRef | undefined,
-): { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> } | undefined {
+): Model<Api> | undefined {
   if (modelRef) {
     const model = ctx.modelRegistry.find(modelRef.provider, modelRef.modelId);
     if (model) return model;
@@ -107,9 +101,9 @@ async function pickEffort(
   ctx: ExtensionCommandContext,
   label: string,
   current: ThinkingLevel,
-  modelCaps?: { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> },
+  model?: Model<Api>,
 ): Promise<ThinkingLevel | null> {
-  const supported = supportedLevels(modelCaps?.reasoning, modelCaps?.thinkingLevelMap);
+  const supported = supportedLevels(model);
   const clamped = clampLevel(current, supported);
 
   const choices = supported.map((lvl) => {
@@ -334,7 +328,7 @@ export async function showPlanSettings(
         draft.planModel = model;
         // Re-clamp plan effort in case the new model has narrower support
         const caps = resolveEffortModel(ctx, draft.planModel);
-        const supported = supportedLevels(caps?.reasoning, caps?.thinkingLevelMap);
+        const supported = supportedLevels(caps);
         draft.planEffort = clampLevel(draft.planEffort, supported);
       }
     } else if (choice.startsWith("Impl thinking")) {
@@ -347,7 +341,7 @@ export async function showPlanSettings(
         draft.implModel = model;
         // Re-clamp impl effort in case the new model has narrower support
         const caps = resolveEffortModel(ctx, draft.implModel);
-        const supported = supportedLevels(caps?.reasoning, caps?.thinkingLevelMap);
+        const supported = supportedLevels(caps);
         draft.implEffort = clampLevel(draft.implEffort, supported);
       }
     }

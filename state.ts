@@ -49,6 +49,9 @@ export interface PlanModeState {
   phase: Phase;
   todoItems: TodoItem[];
 
+  /** Plannotator browser review awaiting a human verdict, if any. */
+  pendingReviewId?: string;
+
   /** Saved model before plan mode was activated. Restored on exit. */
   previousModel?: ModelSnapshot;
   /** Saved thinking effort before plan mode. Restored on exit. */
@@ -91,7 +94,7 @@ const transitions: Transition[] = [
     from: [Phase.PLANNING, Phase.PLAN_READY, Phase.EXECUTING],
     to: Phase.IDLE,
     guard: (_s, e) => e.type === "TOGGLE",
-    update: () => ({ todoItems: [] }),
+    update: () => ({ todoItems: [], pendingReviewId: undefined }),
   },
 
   // Agent produced a plan → PLAN_READY
@@ -108,6 +111,7 @@ const transitions: Transition[] = [
     from: [Phase.PLAN_READY],
     to: Phase.EXECUTING,
     guard: (_s, e) => e.type === "EXECUTE_CHOSEN",
+    update: () => ({ pendingReviewId: undefined }),
   },
 
   // User chose to refine → back to PLANNING for another round
@@ -122,7 +126,7 @@ const transitions: Transition[] = [
     from: [Phase.EXECUTING],
     to: Phase.IDLE,
     guard: (_s, e) => e.type === "ALL_STEPS_DONE",
-    update: () => ({ todoItems: [] }),
+    update: () => ({ todoItems: [], pendingReviewId: undefined }),
   },
 ];
 

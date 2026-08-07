@@ -36,8 +36,8 @@ import { showPlanSettings } from "./settings-ui.js";
 /** Read-only tools available during the planning / exploration phase. */
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
 
-/** Full-access tools available during normal operation and execution phase. */
-const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
+/** Fallback tools for sessions that predate active-tool snapshots. */
+const FALLBACK_NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write"];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,6 +77,13 @@ function availableToolNames(pi: ExtensionAPI): Set<string> {
 function resolvePlanModeTools(pi: ExtensionAPI): string[] {
   const available = availableToolNames(pi);
   return PLAN_MODE_TOOLS.filter((name) => available.has(name));
+}
+
+/** Restore the tools that were active before plan mode restricted them. */
+function resolveNormalModeTools(pi: ExtensionAPI, previousTools?: string[]): string[] {
+  const available = availableToolNames(pi);
+  const tools = previousTools ?? FALLBACK_NORMAL_MODE_TOOLS;
+  return tools.filter((name) => available.has(name));
 }
 
 function hasQuestionnaire(pi: ExtensionAPI): boolean {
@@ -199,11 +206,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       if (state.previousEffort) {
         pi.setThinkingLevel(state.previousEffort);
       }
-      if (state.previousTools) {
-        pi.setActiveTools(state.previousTools);
-      } else {
-        pi.setActiveTools(NORMAL_MODE_TOOLS);
-      }
+      pi.setActiveTools(resolveNormalModeTools(pi, state.previousTools));
       state = { ...state, todoItems: [] };
       ctx.ui.notify("Plan mode disabled. Full access restored.");
     }
@@ -415,7 +418,7 @@ Do NOT attempt to make changes — just describe what you would do.`,
         const completedList = state.todoItems.map((t) => `~~${t.text}~~`).join("\n");
         displayWhenIdle(ctx, "plan-complete", `**Plan Complete!** ✓\n\n${completedList}`);
         state = transition(state, { type: "ALL_STEPS_DONE" });
-        pi.setActiveTools(NORMAL_MODE_TOOLS);
+        pi.setActiveTools(resolveNormalModeTools(pi, state.previousTools));
         updateStatus(ctx);
         persistState();
       } else if (completedStepsInRun > 0) {
@@ -481,7 +484,7 @@ Do NOT attempt to make changes — just describe what you would do.`,
 
         await applyModelForPhase(pi, config, state.phase, ctx);
         applyThinkingForPhase(pi, config, state.phase);
-        pi.setActiveTools(NORMAL_MODE_TOOLS);
+        pi.setActiveTools(resolveNormalModeTools(pi, state.previousTools));
 
         const firstStep = state.todoItems[0]?.text ?? "the plan";
         const execMessage =
@@ -539,6 +542,14 @@ Do NOT attempt to make changes — just describe what you would do.`,
     // Honor --plan flag
     if (pi.getFlag("plan") === true) {
       state = transition(state, { type: "TOGGLE" });
+      state = {
+        ...state,
+        previousModel: ctx.model
+          ? { provider: ctx.model.provider, id: ctx.model.id }
+          : state.previousModel,
+        previousEffort: pi.getThinkingLevel(),
+        previousTools: pi.getActiveTools(),
+      };
     }
 
     // Restore persisted config from file
@@ -588,7 +599,7 @@ Do NOT attempt to make changes — just describe what you would do.`,
 
     // Apply the right tool set and thinking for the restored phase
     if (state.phase === Phase.EXECUTING) {
-      pi.setActiveTools(NORMAL_MODE_TOOLS);
+      pi.setActiveTools(resolveNormalModeTools(pi, state.previousTools));
       applyThinkingForPhase(pi, config, state.phase);
     } else if (isPlanModeActive(state)) {
       pi.setActiveTools(resolvePlanModeTools(pi));

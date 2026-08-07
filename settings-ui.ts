@@ -17,6 +17,7 @@ import {
   EFFORT_LEVELS,
   type ModelRef,
   type PlanModeConfig,
+  type PlanPreset,
   type ThinkingLevel,
 } from "./config.js";
 
@@ -45,6 +46,42 @@ function modelRefFromSelect(value: string): ModelRef | undefined {
 function modelSelectValue(m: ModelRef | undefined): string {
   if (!m) return KEEP_CURRENT;
   return `${m.provider}/${m.modelId}`;
+}
+
+function clonePreset(preset: PlanPreset): PlanPreset {
+  return {
+    ...preset,
+    planModel: preset.planModel ? { ...preset.planModel } : undefined,
+    implModel: preset.implModel ? { ...preset.implModel } : undefined,
+  };
+}
+
+function presetModelLabel(model: ModelRef | undefined): string {
+  if (!model) return "current model";
+  return model.modelId.split("/").pop() ?? model.modelId;
+}
+
+function presetDetails(preset: PlanPreset): string {
+  return `${presetModelLabel(preset.planModel)} / ${preset.planEffort} → ${presetModelLabel(preset.implModel)} / ${preset.implEffort}`;
+}
+
+function presetLabel(name: string, preset: PlanPreset, nameWidth = name.length): string {
+  return `${name.padEnd(nameWidth)}  ${presetDetails(preset)}`;
+}
+
+function sameModel(a: ModelRef | undefined, b: ModelRef | undefined): boolean {
+  return a?.provider === b?.provider && a?.modelId === b?.modelId;
+}
+
+function matchesDraft(preset: PlanPreset, draft: PlanModeConfig): boolean {
+  return sameModel(preset.planModel, draft.planModel) &&
+    sameModel(preset.implModel, draft.implModel) &&
+    preset.planEffort === draft.planEffort &&
+    preset.implEffort === draft.implEffort;
+}
+
+function sortedPresetNames(presets: Record<string, PlanPreset>): string[] {
+  return Object.keys(presets).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,12 +338,16 @@ export async function showPlanSettings(
     implModel: config.implModel ? { ...config.implModel } : undefined,
     planEffort: config.planEffort,
     implEffort: config.implEffort,
+    presets: Object.fromEntries(
+      Object.entries(config.presets).map(([name, preset]) => [name, clonePreset(preset)]),
+    ),
     plannotatorReview: config.plannotatorReview,
   };
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const choices = [
+      `Presets (${Object.keys(draft.presets).length})`,
       `Plan thinking:   ${draft.planEffort}`,
       `Plan model:      ${modelLabel(draft.planModel)}`,
       `Impl thinking:   ${draft.implEffort}`,
@@ -317,7 +358,7 @@ export async function showPlanSettings(
 
     const choice = await ctx.ui.select("Plan mode settings — choose a setting to change:", choices);
 
-    // Cancelled or "Save and close"
+    // Escape from the main menu saves the draft, just like the explicit action.
     if (!choice || choice.startsWith("💾")) break;
 
     if (choice.startsWith("Plan thinking")) {
@@ -345,6 +386,84 @@ export async function showPlanSettings(
         const caps = resolveEffortModel(ctx, draft.implModel);
         const supported = supportedLevels(caps);
         draft.implEffort = clampLevel(draft.implEffort, supported);
+      }
+    } else if (choice.startsWith("Presets")) {
+      // Keep preset operations inside a submenu so the four live settings remain easy to scan.
+      while (true) {
+        const action = await ctx.ui.select("Plan mode presets:", [
+          "Load preset",
+          "Save current settings as preset",
+          "Delete preset",
+          "← Back",
+        ]);
+        if (!action || action.startsWith("←")) break;
+
+        const names = sortedPresetNames(draft.presets);
+        if (action.startsWith("Save")) {
+          const enteredName = await ctx.ui.editor("Preset name:", "");
+          const name = enteredName?.trim();
+          if (!name) continue;
+          const existing = draft.presets[name];
+          if (existing) {
+            const replace = await ctx.ui.select(`Preset "${name}" already exists. Replace it?`, ["Replace", "Cancel"]);
+            if (replace !== "Replace") continue;
+          }
+          draft.presets[name] = {
+            planModel: draft.planModel ? { ...draft.planModel } : undefined,
+            implModel: draft.implModel ? { ...draft.implModel } : undefined,
+            planEffort: draft.planEffort,
+            implEffort: draft.implEffort,
+          };
+          ctx.ui.notify(`Preset "${name}" saved.`, "info");
+        } else if (action.startsWith("Load")) {
+          if (names.length === 0) {
+            ctx.ui.notify("No plan mode presets saved.", "info");
+            continue;
+          }
+          const nameWidth = Math.max(...names.map((name) => name.length));
+          const selected = await ctx.ui.select(
+            "Load preset:",
+            names.map((name) => {
+              const preset = draft.presets[name];
+              return `${matchesDraft(preset, draft) ? "* " : "  "}${presetLabel(name, preset, nameWidth)}`;
+            }),
+          );
+          if (!selected) continue;
+          const name = selected.trimStart().slice(0, nameWidth).trimEnd();
+          if (!draft.presets[name]) continue;
+          const preset = draft.presets[name];
+          const planAvailable = !preset.planModel || !!ctx.modelRegistry.find(preset.planModel.provider, preset.planModel.modelId);
+          const implAvailable = !preset.implModel || !!ctx.modelRegistry.find(preset.implModel.provider, preset.implModel.modelId);
+          draft.planModel = planAvailable ? (preset.planModel ? { ...preset.planModel } : undefined) : draft.planModel;
+          draft.implModel = implAvailable ? (preset.implModel ? { ...preset.implModel } : undefined) : draft.implModel;
+          draft.planEffort = preset.planEffort;
+          draft.implEffort = preset.implEffort;
+          if (!planAvailable || !implAvailable) {
+            const unavailable = [!planAvailable ? `planning model ${modelLabel(preset.planModel)}` : "", !implAvailable ? `implementation model ${modelLabel(preset.implModel)}` : ""].filter(Boolean).join(" and ");
+            ctx.ui.notify(`Preset loaded, but ${unavailable} is unavailable; kept the current value.`, "warning");
+          }
+          draft.planEffort = clampLevel(draft.planEffort, supportedLevels(resolveEffortModel(ctx, draft.planModel)));
+          draft.implEffort = clampLevel(draft.implEffort, supportedLevels(resolveEffortModel(ctx, draft.implModel)));
+          ctx.ui.notify(`Preset "${name}" loaded.`, "info");
+        } else if (action.startsWith("Delete")) {
+          if (names.length === 0) {
+            ctx.ui.notify("No plan mode presets saved.", "info");
+            continue;
+          }
+          const nameWidth = Math.max(...names.map((name) => name.length));
+          const selected = await ctx.ui.select(
+            "Delete preset:",
+            names.map((name) => presetLabel(name, draft.presets[name], nameWidth)),
+          );
+          if (!selected) continue;
+          const name = selected.slice(0, nameWidth).trimEnd();
+          if (!draft.presets[name]) continue;
+          const confirm = await ctx.ui.select(`Delete preset "${name}"?`, ["Delete", "Cancel"]);
+          if (confirm === "Delete") {
+            delete draft.presets[name];
+            ctx.ui.notify(`Preset "${name}" deleted.`, "info");
+          }
+        }
       }
     } else if (choice.startsWith("Plannotator review")) {
       const toggle = await ctx.ui.select("Open drafted plans in Plannotator for browser review?", [

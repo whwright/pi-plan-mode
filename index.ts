@@ -240,7 +240,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("plan-settings", {
-    description: "Configure plan mode (model, thinking effort)",
+    description: "Configure plan mode (models, thinking, and presets)",
     handler: async (_args, ctx) => {
       const updated = await showPlanSettings(ctx, pi, config);
 
@@ -249,6 +249,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       config.implModel = updated.implModel;
       config.planEffort = updated.planEffort;
       config.implEffort = updated.implEffort;
+      config.presets = Object.fromEntries(
+        Object.entries(updated.presets).map(([name, preset]) => [name, {
+          ...preset,
+          planModel: preset.planModel ? { ...preset.planModel } : undefined,
+          implModel: preset.implModel ? { ...preset.implModel } : undefined,
+        }]),
+      );
       config.plannotatorReview = updated.plannotatorReview;
 
       // Persist to file so settings survive all sessions

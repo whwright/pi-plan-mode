@@ -93,8 +93,9 @@ Use the `/plan-settings` command to interactively configure plan mode. This open
 - **Plan model** — Defaults to your session's current model
 - **Implementation thinking effort** — Defaults to `low`
 - **Implementation model** — Defaults to your session's current model
+- **Presets** — Save, load, replace, and delete named combinations of the four model/thinking settings
 
-Model selection uses a fuzzy-searchable list — type characters to narrow results. Settings are persisted across all sessions in `~/.pi/agent/extensions/pi-plan-mode/config.json`.
+Model selection uses a fuzzy-searchable list — type characters to narrow results. Open **Presets** inside `/plan-settings` to save the current draft under a name, load a saved combination, or delete one. Escape cancels the settings draft; choose **Save and close** to persist changes. Reusing a name asks for confirmation before replacement. If a saved model is no longer available, loading the preset warns you and keeps the current model for that phase while applying the other values. Settings and presets are persisted across all sessions in `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 
 ```
 /plan-settings

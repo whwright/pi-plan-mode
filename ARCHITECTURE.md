@@ -123,8 +123,8 @@ Phases:
 
 Defaults: current model for both phases, `xhigh` planning effort, `low` execution effort.
 
-Override via `/plan-settings` — an interactive menu with a fuzzy-searchable model picker.
-Settings persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
+Override via `/plan-settings` — an interactive menu with a fuzzy-searchable model picker. Its Presets submenu stores named combinations of plan model, plan effort, implementation model, and implementation effort. Presets can be saved from the current draft, loaded as a group, replaced after confirmation, or deleted. Loading warns and preserves the current model when a saved model is unavailable, while still applying the other values.
+Settings and presets persist to `~/.pi/agent/extensions/pi-plan-mode/config.json`.
 
 ---
 

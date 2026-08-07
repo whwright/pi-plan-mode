@@ -31,6 +31,13 @@ export interface ModelRef {
 }
 
 /** Runtime-mutable configuration. */
+export interface PlanPreset {
+  planModel?: ModelRef;
+  implModel?: ModelRef;
+  planEffort: ThinkingLevel;
+  implEffort: ThinkingLevel;
+}
+
 export interface PlanModeConfig {
   /** Model override for the planning phase, or undefined to keep current. */
   planModel?: ModelRef;
@@ -40,6 +47,8 @@ export interface PlanModeConfig {
   planEffort: ThinkingLevel;
   /** Thinking effort during execution (defaults to "low"). */
   implEffort: ThinkingLevel;
+  /** Named combinations of phase models and thinking levels. */
+  presets: Record<string, PlanPreset>;
   /** Open drafted plans in Plannotator for browser review (defaults to true). */
   plannotatorReview: boolean;
 }
@@ -50,7 +59,15 @@ export interface SerializedConfig {
   implModel?: { provider: string; modelId: string } | null;
   planEffort?: ThinkingLevel;
   implEffort?: ThinkingLevel;
+  presets?: Record<string, SerializedPreset>;
   plannotatorReview?: boolean;
+}
+
+interface SerializedPreset {
+  planModel?: { provider: string; modelId: string } | null;
+  implModel?: { provider: string; modelId: string } | null;
+  planEffort: ThinkingLevel;
+  implEffort: ThinkingLevel;
 }
 
 /** Path to the persisted settings file. */
@@ -72,6 +89,7 @@ export function createPlanModeConfig(): PlanModeConfig {
   return {
     planEffort: DEFAULT_PLAN_EFFORT,
     implEffort: DEFAULT_IMPL_EFFORT,
+    presets: {},
     plannotatorReview,
   };
 }
@@ -108,6 +126,9 @@ export function serializeConfig(config: PlanModeConfig): SerializedConfig {
     implModel: config.implModel ? { provider: config.implModel.provider, modelId: config.implModel.modelId } : null,
     planEffort: config.planEffort,
     implEffort: config.implEffort,
+    presets: Object.fromEntries(
+      Object.entries(config.presets).map(([name, preset]) => [name, serializePreset(preset)]),
+    ),
     plannotatorReview: config.plannotatorReview,
   };
 }
@@ -126,7 +147,47 @@ export function applySerializedConfig(config: PlanModeConfig, data: Partial<Seri
   if (data.implEffort !== undefined) {
     config.implEffort = data.implEffort;
   }
+  if (data.presets !== undefined && data.presets && typeof data.presets === "object" && !Array.isArray(data.presets)) {
+    config.presets = Object.fromEntries(
+      Object.entries(data.presets)
+        .filter(([name, preset]) => name.trim().length > 0 && isValidPreset(preset))
+        .map(([name, preset]) => [name, clonePreset(preset as PlanPreset)]),
+    );
+  }
   if (data.plannotatorReview !== undefined) {
     config.plannotatorReview = data.plannotatorReview;
   }
+}
+
+function serializePreset(preset: PlanPreset): SerializedPreset {
+  return {
+    planModel: preset.planModel ? { ...preset.planModel } : null,
+    implModel: preset.implModel ? { ...preset.implModel } : null,
+    planEffort: preset.planEffort,
+    implEffort: preset.implEffort,
+  };
+}
+
+function clonePreset(preset: PlanPreset): PlanPreset {
+  return {
+    ...preset,
+    planModel: preset.planModel ? { ...preset.planModel } : undefined,
+    implModel: preset.implModel ? { ...preset.implModel } : undefined,
+  };
+}
+
+function isValidPreset(value: unknown): value is SerializedPreset {
+  if (!value || typeof value !== "object") return false;
+  const preset = value as Partial<SerializedPreset>;
+  return EFFORT_LEVELS.includes(preset.planEffort as ThinkingLevel) &&
+    EFFORT_LEVELS.includes(preset.implEffort as ThinkingLevel) &&
+    (preset.planModel === null || preset.planModel === undefined || validModel(preset.planModel)) &&
+    (preset.implModel === null || preset.implModel === undefined || validModel(preset.implModel));
+}
+
+function validModel(value: unknown): value is ModelRef {
+  if (!value || typeof value !== "object") return false;
+  const model = value as Partial<ModelRef>;
+  return typeof model.provider === "string" && model.provider.length > 0 &&
+    typeof model.modelId === "string" && model.modelId.length > 0;
 }

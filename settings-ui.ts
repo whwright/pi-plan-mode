@@ -47,16 +47,73 @@ function modelSelectValue(m: ModelRef | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
-// Effort picker — simple ctx.ui.select dialog
+// Effort level helpers — model-aware filtering
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the set of thinking levels a model actually supports.
+ *
+ * - Non-reasoning models support only `"off"`.
+ * - If the model has a `thinkingLevelMap`, levels mapped to `null` are
+ *   unsupported; omitted or string-valued levels are supported.
+ * - If neither condition applies, all standard levels are shown (backward
+ *   compatibility).
+ */
+function supportedLevels(
+  reasoning: boolean | undefined,
+  thinkingLevelMap: Record<string, string | null> | undefined,
+): ThinkingLevel[] {
+  if (reasoning === false) return ["off"];
+  if (!thinkingLevelMap) return [...EFFORT_LEVELS];
+  return EFFORT_LEVELS.filter((lvl) => thinkingLevelMap[lvl] !== null);
+}
+
+/**
+ * Clamp an effort level to the nearest supported level.
+ * Searches downward from the current level's position in EFFORT_LEVELS;
+ * if nothing below is supported, returns the highest supported level.
+ */
+function clampLevel(level: ThinkingLevel, supported: ThinkingLevel[]): ThinkingLevel {
+  if (supported.includes(level)) return level;
+  const idx = EFFORT_LEVELS.indexOf(level);
+  for (let i = idx - 1; i >= 0; i--) {
+    if (supported.includes(EFFORT_LEVELS[i])) return EFFORT_LEVELS[i];
+  }
+  return supported[supported.length - 1];
+}
+
+/**
+ * Resolve the model to consult for effort-level availability.
+ *
+ * If the caller has configured a model override for the phase, look it up in
+ * the registry.  Otherwise fall back to the current session model.
+ */
+function resolveEffortModel(
+  ctx: ExtensionCommandContext,
+  modelRef: ModelRef | undefined,
+): { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> } | undefined {
+  if (modelRef) {
+    const model = ctx.modelRegistry.find(modelRef.provider, modelRef.modelId);
+    if (model) return model;
+  }
+  return ctx.model;
+}
+
+// ---------------------------------------------------------------------------
+// Effort picker — model-aware ctx.ui.select dialog
 // ---------------------------------------------------------------------------
 
 async function pickEffort(
   ctx: ExtensionCommandContext,
   label: string,
   current: ThinkingLevel,
+  modelCaps?: { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> },
 ): Promise<ThinkingLevel | null> {
-  const choices = EFFORT_LEVELS.map((lvl) => {
-    const marker = lvl === current ? " ✓" : "";
+  const supported = supportedLevels(modelCaps?.reasoning, modelCaps?.thinkingLevelMap);
+  const clamped = clampLevel(current, supported);
+
+  const choices = supported.map((lvl) => {
+    const marker = lvl === clamped ? " ✓" : "";
     return `${lvl}${marker}`;
   });
 
@@ -268,17 +325,31 @@ export async function showPlanSettings(
     if (!choice || choice.startsWith("💾")) break;
 
     if (choice.startsWith("Plan thinking")) {
-      const level = await pickEffort(ctx, "plan thinking effort", draft.planEffort);
+      const caps = resolveEffortModel(ctx, draft.planModel);
+      const level = await pickEffort(ctx, "plan thinking effort", draft.planEffort, caps);
       if (level) draft.planEffort = level;
     } else if (choice.startsWith("Plan model")) {
       const model = await pickModel(ctx, pi, "plan model", draft.planModel);
-      if (model !== null) draft.planModel = model;
+      if (model !== null) {
+        draft.planModel = model;
+        // Re-clamp plan effort in case the new model has narrower support
+        const caps = resolveEffortModel(ctx, draft.planModel);
+        const supported = supportedLevels(caps?.reasoning, caps?.thinkingLevelMap);
+        draft.planEffort = clampLevel(draft.planEffort, supported);
+      }
     } else if (choice.startsWith("Impl thinking")) {
-      const level = await pickEffort(ctx, "implementation thinking effort", draft.implEffort);
+      const caps = resolveEffortModel(ctx, draft.implModel);
+      const level = await pickEffort(ctx, "implementation thinking effort", draft.implEffort, caps);
       if (level) draft.implEffort = level;
     } else if (choice.startsWith("Impl model")) {
       const model = await pickModel(ctx, pi, "implementation model", draft.implModel);
-      if (model !== null) draft.implModel = model;
+      if (model !== null) {
+        draft.implModel = model;
+        // Re-clamp impl effort in case the new model has narrower support
+        const caps = resolveEffortModel(ctx, draft.implModel);
+        const supported = supportedLevels(caps?.reasoning, caps?.thinkingLevelMap);
+        draft.implEffort = clampLevel(draft.implEffort, supported);
+      }
     }
   }
 
